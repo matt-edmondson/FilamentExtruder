@@ -216,14 +216,6 @@ Connect at 115200 baud to see:
 
 ## Troubleshooting
 
-### Build Script Issues
-1. **PowerShell Execution Policy Error**: Run `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser`
-2. **Python Installation Fails**: Manually install from [python.org](https://python.org) and retry
-3. **PlatformIO Not Found After Install**: Close and reopen terminal/PowerShell to refresh PATH
-4. **Upload Fails**: Ensure Pico W is in bootloader mode (hold BOOTSEL while connecting USB)
-
-**For detailed troubleshooting steps, see [TROUBLESHOOTING.md](TROUBLESHOOTING.md)**
-
 ### Hardware Issues
 1. **No Display Output**: Check I2C address (try 0x3C if 0x3D fails)
 2. **ADC Not Responding**: Verify I2C addresses (0x35, 0x36) and connections
@@ -260,7 +252,7 @@ The Adafruit GFX library provides extensive drawing functions for customizing th
 - **Wire**: Arduino I2C library
 
 ## License
-This project is open source. Feel free to modify and distribute.
+This project is licensed under the MIT License. See `LICENSE` for details.
 
 ## Support
 For issues or questions, check the serial output first for debugging information.
