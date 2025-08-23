@@ -5,6 +5,7 @@ Param(
   [int]$MonitorTimeoutSeconds = 60,
   [int]$Baud = 115200,
   [switch]$NoMonitor,
+  [int]$SerialProbeSeconds = 3,
   [string]$CliPath,
   [string]$Fqbn = 'rp2040:rp2040:rpipicow:usbstack=picosdk',
   [string]$OutputDir = '.\\build',
@@ -100,6 +101,7 @@ function Compile([string]$cli, [string]$sketch, [string]$fqbn, [string]$outDir) 
   Write-Info "Compiling $([IO.Path]::GetFileName($sketch)) for $fqbn"
   New-Item -ItemType Directory -Force -Path $outDir | Out-Null
   & $cli compile --fqbn $fqbn --output-dir $outDir --warnings all --verbose $sketch
+  if ($LASTEXITCODE -ne 0) { throw "Compile failed with exit code $LASTEXITCODE" }
 }
 
 function Find-UF2([string]$outDir) {
@@ -144,6 +146,7 @@ function Upload-ViaMassStorage([string]$uf2, [int]$timeoutSec) {
 function Upload-ViaSerial([string]$cli, [string]$sketch, [string]$fqbn, [string]$port) {
   Write-Info "Uploading via serial on $port"
   & $cli upload --fqbn $fqbn -p $port $sketch
+  if ($LASTEXITCODE -ne 0) { throw "Serial upload failed with exit code $LASTEXITCODE" }
 }
 
 function Get-SerialPortList {
@@ -176,7 +179,7 @@ function Wait-ForSerialPort([string[]]$baseline, [string]$preferredPort, [int]$t
 
 function Start-SerialMonitor([string]$cli, [string]$port, [int]$baud) {
   Write-Info "Starting serial monitor on $port @ ${baud} baud (Ctrl+C to exit)"
-  & $cli monitor -p $port -c "baud=$baud"
+  & $cli monitor -p $port -c "baudrate=$baud"
 }
 
 function Find-SerialPortViaCli([string]$cli, [string]$fqbn) {
@@ -204,6 +207,15 @@ function Find-SerialPortViaCli([string]$cli, [string]$fqbn) {
     }
   } catch {}
   return $null
+}
+
+function Get-CandidateSerialPorts([string]$cli, [string]$fqbn) {
+  $candidates = @()
+  $cliPort = Find-SerialPortViaCli -cli $cli -fqbn $fqbn
+  if ($cliPort) { $candidates += $cliPort }
+  $localPorts = Get-SerialPortList
+  if ($localPorts) { $candidates += $localPorts }
+  return ($candidates | Where-Object { $_ } | Sort-Object -Unique)
 }
 
 try {
@@ -234,26 +246,26 @@ try {
     }
   }
 
-  # Auto-detect serial port for Pico W and prefer uploading over serial
-  $autoPort = Find-SerialPortViaCli -cli $cli -fqbn $Fqbn
-  if (-not $autoPort) {
-    $portsNow = Get-SerialPortList
-    if ($portsNow.Count -eq 1) { $autoPort = $portsNow[0] }
-  }
-  if ($autoPort) {
-    Write-Info "Detected Pico serial port: $autoPort (attempting serial upload)"
-    try {
-      Upload-ViaSerial -cli $cli -sketch $sketchPath -fqbn $Fqbn -port $autoPort
-      if (-not $NoMonitor) {
-        $monitorPort = Wait-ForSerialPort -baseline $baselinePorts -preferredPort $autoPort -timeoutSec $MonitorTimeoutSeconds
-        if (-not $monitorPort) { $monitorPort = $autoPort }
-        Start-SerialMonitor -cli $cli -port $monitorPort -baud $Baud
+  # Probe available serial ports first (before UF2)
+  $probeDeadline = (Get-Date).AddSeconds([Math]::Max(1, $SerialProbeSeconds))
+  do {
+    $candidates = Get-CandidateSerialPorts -cli $cli -fqbn $Fqbn
+    foreach ($cand in $candidates) {
+      Write-Info "Trying serial upload on $cand"
+      try {
+        Upload-ViaSerial -cli $cli -sketch $sketchPath -fqbn $Fqbn -port $cand
+        if (-not $NoMonitor) {
+          $monitorPort = Wait-ForSerialPort -baseline $baselinePorts -preferredPort $cand -timeoutSec $MonitorTimeoutSeconds
+          if (-not $monitorPort) { $monitorPort = $cand }
+          Start-SerialMonitor -cli $cli -port $monitorPort -baud $Baud
+        }
+        exit 0
+      } catch {
+        Write-Warn "Serial upload on $cand failed: $($_.Exception.Message)"
       }
-      exit 0
-    } catch {
-      Write-Warn "Auto serial upload failed: $($_.Exception.Message). Falling back to UF2 mass-storage copy."
     }
-  }
+    Start-Sleep -Milliseconds 300
+  } while ((Get-Date) -lt $probeDeadline)
 
   Upload-ViaMassStorage -uf2 $uf2 -timeoutSec $TimeoutSeconds
   if (-not $NoMonitor) {
