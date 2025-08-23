@@ -18,14 +18,17 @@
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
 #define OLED_RESET -1
-#define SCREEN_ADDRESS 0x3C
+#define SCREEN_ADDRESS1 0x3C
+#define SCREEN_ADDRESS2 0x3D
 
 // PiicoDev Potentiometer module addresses
 #define POT1_ADDRESS 0x35
 #define POT2_ADDRESS 0x36
 
-// PiicoDev Potentiometer value range (10-bit: 0-1023)
-#define POT_MAX_VALUE 1023
+// 10-bit: 0-1023
+// 12-bit: 0-4095
+// 16-bit: 0-65535
+#define POT_MAX_VALUE 4095
 
 #define MAX_TEMPERATURE 300
 
@@ -62,6 +65,7 @@ float heaterPower = 0; // 0.0 to 1.0
 unsigned long lastTempUpdate = 0;
 
 // Create display object
+int displayAddress = SCREEN_ADDRESS1;
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 // Variables to store potentiometer values
@@ -70,7 +74,7 @@ uint16_t pot2Value = 0;
 
 // Function prototypes
 void initializeI2C();
-void initializeDisplay();
+bool initializeDisplay();
 void initializeHeaters();
 uint16_t readPicoDevPot(uint8_t address);
 float readTemperature();
@@ -105,7 +109,13 @@ void setup() {
   scanI2CDevices();
   
   // Initialize display
-  initializeDisplay();
+  if (!initializeDisplay()) {
+    Serial.println("Display initialization failed - trying alternate address");
+    displayAddress = SCREEN_ADDRESS2;
+    if (!initializeDisplay()) {
+      Serial.println("Display initialization failed - continuing without display");
+    }
+  }
   
   // Initialize heater control pins
   initializeHeaters();
@@ -191,23 +201,24 @@ void initializeI2C() {
   //Serial.println("WARNING: Using internal pull-ups - add 4.7k external resistors for reliable operation");
 }
 
-void initializeDisplay() {
+bool initializeDisplay() {
   // Test display I2C connection first
   Serial.print("Testing display at address 0x");
-  Serial.print(SCREEN_ADDRESS, HEX);
+  Serial.print(displayAddress, HEX);
   Serial.print("... ");
   
-  Wire.beginTransmission(SCREEN_ADDRESS);
+  Wire.beginTransmission(displayAddress);
   uint8_t error = Wire.endTransmission();
   if (error == 0) {
     Serial.println("Display responds to I2C");
   } else {
     Serial.print("Display I2C error: ");
     Serial.println(error);
+    return false;
   }
   
   // Initialize SSD1306 display
-  if(!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
+  if(!display.begin(SSD1306_SWITCHCAPVCC, displayAddress)) {
     Serial.println("SSD1306 allocation failed");
     for(;;); // Don't proceed, loop forever
   }
@@ -222,6 +233,7 @@ void initializeDisplay() {
   delay(2000);
   
   Serial.println("Display initialized successfully");
+  return true;
 }
 
 uint16_t readPicoDevPot(uint8_t address) {
@@ -324,9 +336,9 @@ void scanI2CDevices() {
       Serial.print(address, HEX);
       
       // Add known device identification
-      if (address == 0x3C || address == 0x3D) {
+      if (address == SCREEN_ADDRESS1 || address == SCREEN_ADDRESS2) {
         Serial.print(" (SSD1306 OLED)");
-      } else if (address == 0x35 || address == 0x36) {
+      } else if (address == POT1_ADDRESS || address == POT2_ADDRESS) {
         Serial.print(" (PiicoDev Potentiometer)");
       }
       Serial.println();
@@ -345,8 +357,16 @@ void scanI2CDevices() {
   if (deviceCount == 0) {
     Serial.println("No I2C devices found - Check wiring and pull-up resistors!");
     Serial.println("Expected devices:");
-    Serial.println("  - 0x3C/0x3D: SSD1306 Display");
-    Serial.println("  - 0x35/0x36: PiicoDev Potentiometer");  
+    Serial.print("  - ");
+    Serial.print(SCREEN_ADDRESS1, HEX);
+    Serial.print("/");
+    Serial.print(SCREEN_ADDRESS2, HEX);
+    Serial.println(": SSD1306 Display");
+    Serial.print("  - ");
+    Serial.print(POT1_ADDRESS, HEX);
+    Serial.print("/");
+    Serial.print(POT2_ADDRESS, HEX);
+    Serial.println(": PiicoDev Potentiometer");  
   } else {
     Serial.print("Found ");
     Serial.print(deviceCount);
