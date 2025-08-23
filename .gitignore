@@ -1,0 +1,36 @@
+# PlatformIO files
+.pio/
+.vscode/
+.pioenvs/
+.piolibdeps/
+.platformio/
+
+# Build directories
+build/
+.build/
+
+# Compiled files
+*.o
+*.elf
+*.bin
+*.hex
+*.map
+
+# IDE files
+*.code-workspace
+.vscode/settings.json
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*~
+*.tmp
+*.bak
+
+# Logs
+*.log
+
+# PowerShell script execution logs
+*.ps1.log

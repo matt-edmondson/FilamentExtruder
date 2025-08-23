@@ -1,0 +1,134 @@
+Raspberry Pi Pico W ADC Project - Wiring Schematic
+=====================================================
+
+RASPBERRY PI PICO W PINOUT (Relevant pins):
+    ┌─────┐
+    │ USB │
+    └──┬──┘
+       │
+    ┌──▼─────────────────────────────┐
+    │  1 GP0                    40   │ VBUS
+    │  2 GP1                    39   │ VSYS  
+    │  3 GND                    38   │ GND ◄──┐
+    │  4 GP2                    37   │ 3V3EN  │
+    │  5 GP3                    36   │ 3V3 ◄──┤
+    │  6 GP4                    35   │ ADC    │
+    │  7 GP5                    34   │ 28     │
+    │  8 GND                    33   │ GND    │
+    │  9 GP6                    32   │ 27     │
+    │ 10 GP7                    31   │ 26     │
+    │ 11 GP8 (SDA) ◄────────────30   │ RUN    │
+    │ 12 GP9 (SCL) ◄────────────29   │ 22     │
+    │ 13 GND                    28   │ 21     │
+    │ 14 GP10                   27   │ 20     │
+    │ 15 GP11                   26   │ 19     │
+    │ 16 GP12                   25   │ 18     │
+    │ 17 GP13                   24   │ 17     │
+    │ 18 GND                    23   │ 16     │
+    │ 19 GP14                   22   │ 15     │
+    │ 20 GP15                   21   │ 14     │
+    └───────────────────────────────┘
+
+I2C BUS CONNECTIONS:
+====================
+
+Power Rails:
+    3V3 (Pin 36) ──┬─── SSD1306 VCC
+                   ├─── ADC Module #1 VCC  
+                   ├─── ADC Module #2 VCC
+                   ├─── Potentiometer #1 VCC
+                   └─── Potentiometer #2 VCC
+
+    GND (Pin 38) ──┬─── SSD1306 GND
+                   ├─── ADC Module #1 GND
+                   ├─── ADC Module #2 GND
+                   ├─── Potentiometer #1 GND
+                   └─── Potentiometer #2 GND
+
+I2C Data Lines:
+    GPIO8 (Pin 11) ─┬─── SSD1306 SDA
+    [SDA]           ├─── ADC Module #1 SDA
+                    └─── ADC Module #2 SDA
+
+    GPIO9 (Pin 12) ─┬─── SSD1306 SCL  
+    [SCL]           ├─── ADC Module #1 SCL
+                    └─── ADC Module #2 SCL
+
+COMPONENT DETAILS:
+==================
+
+SSD1306 OLED Display (0x3C):
+    ┌─────────────┐
+    │ SSD1306     │
+    │ 128x64 OLED │
+    ├─────────────┤
+    │ VCC ◄───────┼─── 3V3
+    │ GND ◄───────┼─── GND  
+    │ SDA ◄───────┼─── GPIO8
+    │ SCL ◄───────┼─── GPIO9
+    └─────────────┘
+
+ADC Module #1 (0x35):
+    ┌─────────────┐
+    │ ADS1115     │
+    │ 16-bit ADC  │
+    ├─────────────┤
+    │ VCC ◄───────┼─── 3V3
+    │ GND ◄───────┼─── GND
+    │ SDA ◄───────┼─── GPIO8
+    │ SCL ◄───────┼─── GPIO9
+    │ AIN0 ◄──────┼─── Potentiometer #1 Wiper
+    │ ADDR ───────┼─── 3V3 (Address: 0x35)
+    └─────────────┘
+
+ADC Module #2 (0x36):
+    ┌─────────────┐
+    │ ADS1115     │
+    │ 16-bit ADC  │
+    ├─────────────┤
+    │ VCC ◄───────┼─── 3V3
+    │ GND ◄───────┼─── GND
+    │ SDA ◄───────┼─── GPIO8
+    │ SCL ◄───────┼─── GPIO9
+    │ AIN0 ◄──────┼─── Potentiometer #2 Wiper
+    │ ADDR ───────┼─── Float (Address: 0x36)
+    └─────────────┘
+
+Analog Potentiometer #1 (10kΩ):
+    ┌─────────────┐
+    │     POT1    │
+    ├─────────────┤
+    │ Pin 1 ──────┼─── 3V3
+    │ Pin 2 ──────┼─── ADC #1 AIN0 (Wiper)
+    │ Pin 3 ──────┼─── GND
+    └─────────────┘
+
+Analog Potentiometer #2 (10kΩ):
+    ┌─────────────┐
+    │     POT2    │
+    ├─────────────┤
+    │ Pin 1 ──────┼─── 3V3
+    │ Pin 2 ──────┼─── ADC #2 AIN0 (Wiper)
+    │ Pin 3 ──────┼─── GND
+    └─────────────┘
+
+BREADBOARD LAYOUT SUGGESTION:
+=============================
+
+    Power Rails:        I2C Bus:
+    [+] 3V3             [SDA] GPIO8  
+    [-] GND             [SCL] GPIO9
+
+    Components arranged in row:
+    [Pico W] ── [SSD1306] ── [ADC #1] ── [ADC #2]
+    
+    Potentiometers can be placed separately:
+    [POT1] ──── (3 wires) ──── [ADC #1]
+    [POT2] ──── (3 wires) ──── [ADC #2]
+
+NOTES:
+======
+- Pull-up resistors (4.7kΩ) on SDA/SCL may be needed if not built into modules
+- Check component datasheets for exact pinouts
+- ADC address pins (ADDR) configure I2C address (0x35, 0x36)
+- Use multimeter to verify connections before powering on
