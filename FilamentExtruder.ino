@@ -83,6 +83,7 @@ void scanI2CDevices();
 void updateHeaterControl();
 void setHeaterState(int heaterIndex, bool state);
 void emergencyShutdown();
+void resetEmergencyWarning();
 float calculateHeaterPower(float targetTemp, float currentTemp);
 void updateTemperatureControl();
 
@@ -157,9 +158,31 @@ void loop() {
   // Update display
   updateDisplay();
   
-  // Print debug info every second
+  // Print debug info only when values change significantly or periodically when stable
   static unsigned long lastDebug = 0;
-  if (millis() - lastDebug > 1000) {
+  static int lastTargetSpeed = -1;
+  static int lastTargetTemp = -1; 
+  static float lastCurrentTemp = -999;
+  static float lastHeaterPower = -1;
+  static bool lastHeaterStates[4] = {false, false, false, false};
+  
+  // Check if any significant values have changed
+  bool valuesChanged = false;
+  if (abs(targetSpeed - lastTargetSpeed) > 10) valuesChanged = true;           // Speed change > 10 RPM
+  if (abs(targetTemperature - lastTargetTemp) > 2) valuesChanged = true;       // Temp setting change > 2°C
+  if (fabs(currentTemperature - lastCurrentTemp) > 1.0) valuesChanged = true; // Temp reading change > 1°C
+  if (fabs(heaterPower - lastHeaterPower) > 0.05) valuesChanged = true;        // Power change > 5%
+  
+  // Check if heater states changed
+  for (int i = 0; i < 4; i++) {
+    if (heaterState[i] != lastHeaterStates[i]) {
+      valuesChanged = true;
+      break;
+    }
+  }
+  
+  // Print debug info when values change OR every 10 seconds when stable (reduce spam)
+  if (valuesChanged || (millis() - lastDebug > 10000)) {
     Serial.print("Pot1: ");
     Serial.print(pot1Value);
     Serial.print(" | Pot2: ");
@@ -172,11 +195,25 @@ void loop() {
     Serial.print(targetTemperature);
     Serial.print("°C | Heater Power: ");
     Serial.print(heaterPower * 100, 1);
-    Serial.print("% | Heaters: ");
-    for (int i = 0; i < 4; i++) {
-      Serial.print(heaterState[i] ? "ON " : "OFF ");
-    }
+    Serial.print("% | Heaters (offset): H1:");
+    Serial.print(heaterState[0] ? "ON" : "OFF");
+    Serial.print(" H2:");
+    Serial.print(heaterState[1] ? "ON" : "OFF");
+    Serial.print(" H3:");
+    Serial.print(heaterState[2] ? "ON" : "OFF");
+    Serial.print(" H4:");
+    Serial.print(heaterState[3] ? "ON" : "OFF");
     Serial.println();
+    
+    // Update last values
+    lastTargetSpeed = targetSpeed;
+    lastTargetTemp = targetTemperature;
+    lastCurrentTemp = currentTemperature;
+    lastHeaterPower = heaterPower;
+    for (int i = 0; i < 4; i++) {
+      lastHeaterStates[i] = heaterState[i];
+    }
+    
     lastDebug = millis();
   }
 }
@@ -227,12 +264,72 @@ bool initializeDisplay() {
 }
 
 uint16_t readAnalogPot(int pin) {
-  // Read analog potentiometer directly
-  uint16_t reading = analogRead(pin);
+  // Static variables to store filtered values for each pin
+  static float filteredPot1 = 0;
+  static float filteredPot2 = 0;
+  static bool initialized = false;
   
-  // The ADC reading is already in the correct range (0 to POT_MAX_VALUE)
-  // No additional processing needed
-  return reading;
+  // Read raw analog value
+  uint16_t rawReading = analogRead(pin);
+  
+  // Initialize filters on first call
+  if (!initialized) {
+    filteredPot1 = rawReading;
+    filteredPot2 = rawReading; 
+    initialized = true;
+  }
+  
+  // Exponential moving average filter (adjustable smoothing)
+  const float smoothingFactor = 0.15; // 0.05 = very smooth, 0.3 = more responsive
+  
+  float* currentFilter;
+  if (pin == POT1_PIN) {
+    currentFilter = &filteredPot1;
+  } else if (pin == POT2_PIN) {
+    currentFilter = &filteredPot2;
+  } else {
+    return rawReading; // Unknown pin, return raw reading
+  }
+  
+  // Apply exponential smoothing: new_value = (alpha × raw) + ((1-alpha) × old_value)
+  *currentFilter = (smoothingFactor * rawReading) + ((1.0 - smoothingFactor) * (*currentFilter));
+  
+  // Add deadband filter to eliminate tiny jitter around current position
+  static uint16_t lastPot1Output = 0;
+  static uint16_t lastPot2Output = 0;
+  
+  uint16_t* lastOutput;
+  if (pin == POT1_PIN) {
+    lastOutput = &lastPot1Output;
+  } else {
+    lastOutput = &lastPot2Output;
+  }
+  
+  uint16_t smoothedReading = (uint16_t)(*currentFilter + 0.5); // Round to nearest integer
+  
+  // Deadband: only update output if change is significant (reduces jitter)
+  const uint16_t deadband = 8; // Ignore changes smaller than this
+  if (abs(smoothedReading - *lastOutput) > deadband) {
+    *lastOutput = smoothedReading;
+  }
+  
+  // Optional debug output (uncomment to see denoising in action)
+  /*
+  static unsigned long lastDebug = 0;
+  if (millis() - lastDebug > 500) { // Debug every 500ms
+    Serial.print("Pin ");
+    Serial.print(pin == POT1_PIN ? "A1" : "A2");
+    Serial.print(" - Raw: ");
+    Serial.print(rawReading);
+    Serial.print(", Filtered: ");
+    Serial.print(smoothedReading);
+    Serial.print(", Output: ");
+    Serial.println(*lastOutput);
+    lastDebug = millis();
+  }
+  */
+  
+  return *lastOutput;
 }
 
 void updateDisplay() {
@@ -341,10 +438,29 @@ void scanI2CDevices() {
 }
 
 float readTemperature() {
-  int raw = analogRead(THERMISTOR_PIN);
+  // Static variables for temperature denoising
+  static float filteredADC = 0;
+  static float filteredTemperature = 0;
+  static bool tempInitialized = false;
+  
+  // Read raw ADC value
+  int rawADC = analogRead(THERMISTOR_PIN);
+  
+  // Initialize filters on first call
+  if (!tempInitialized) {
+    filteredADC = rawADC;
+    tempInitialized = true;
+  }
+  
+  // First-stage filter: Smooth ADC readings (faster response for electrical noise)
+  const float adcSmoothingFactor = 0.3; // More responsive than pot filters
+  filteredADC = (adcSmoothingFactor * rawADC) + ((1.0 - adcSmoothingFactor) * filteredADC);
+  
+  // Use filtered ADC value for calculations
+  int smoothedRaw = (int)(filteredADC + 0.5); // Round to nearest integer
   
   // Calculate resistance using measured VREF and series resistor values
-  float voltage = raw * (VREF / (float)ADC_MAX_VALUE);
+  float voltage = smoothedRaw * (VREF / (float)ADC_MAX_VALUE);
   float resistance = THERMISTOR_SERIES_RESISTOR * voltage / (VREF - voltage);
   
   // Steinhart-Hart equation
@@ -355,7 +471,41 @@ float readTemperature() {
   steinhart = 1.0 / steinhart;
   steinhart -= 273.15;
   
-  return steinhart;
+  // Second-stage filter: Smooth final temperature (slower, for thermal stability)
+  if (!tempInitialized) {
+    filteredTemperature = steinhart;
+    tempInitialized = true;
+  }
+  
+  const float tempSmoothingFactor = 0.1; // Very smooth for temperature stability
+  filteredTemperature = (tempSmoothingFactor * steinhart) + ((1.0 - tempSmoothingFactor) * filteredTemperature);
+  
+  // Temperature deadband: only significant changes update the output
+  static float lastTempOutput = 25.0; // Default room temperature
+  const float tempDeadband = 0.5; // Ignore changes smaller than 0.5°C
+  
+  if (fabs(filteredTemperature - lastTempOutput) > tempDeadband) {
+    lastTempOutput = filteredTemperature;
+  }
+  
+  // Optional debug output for temperature denoising
+  /*
+  static unsigned long lastTempDebug = 0;
+  if (millis() - lastTempDebug > 2000) { // Debug every 2 seconds
+    Serial.print("Thermistor - Raw ADC: ");
+    Serial.print(rawADC);
+    Serial.print(", Filtered ADC: ");
+    Serial.print(smoothedRaw);
+    Serial.print(", Raw Temp: ");
+    Serial.print(steinhart, 2);
+    Serial.print("°C, Filtered Temp: ");
+    Serial.print(lastTempOutput, 2);
+    Serial.println("°C");
+    lastTempDebug = millis();
+  }
+  */
+  
+  return lastTempOutput;
 }
 
 void initializeHeaters() {
@@ -369,14 +519,23 @@ void initializeHeaters() {
   pinMode(28, OUTPUT);
   digitalWrite(28, HIGH);  // Set GPIO28 to VREF
   
-  // Initialize all heaters to OFF
-  digitalWrite(HEATER_1_PIN, LOW);
-  digitalWrite(HEATER_2_PIN, LOW);
-  digitalWrite(HEATER_3_PIN, LOW);
-  digitalWrite(HEATER_4_PIN, LOW);
+  // Initialize all heaters to OFF (HIGH = OFF for low-triggered relays)
+  digitalWrite(HEATER_1_PIN, HIGH);
+  digitalWrite(HEATER_2_PIN, HIGH);
+  digitalWrite(HEATER_3_PIN, HIGH);
+  digitalWrite(HEATER_4_PIN, HIGH);
   
   Serial.println("Heater control pins initialized (GPIO18-21)");
-  Serial.println("All heaters initialized to OFF state");
+  Serial.println("All heaters initialized to OFF state (HIGH = OFF for low-triggered relays)");
+  Serial.print("Heater pulse interval: ");
+  Serial.print(HEATER_PULSE_INTERVAL);
+  Serial.print("ms, Offsets: 0ms, ");
+  Serial.print(HEATER_PULSE_INTERVAL/4);
+  Serial.print("ms, ");
+  Serial.print(HEATER_PULSE_INTERVAL/2);
+  Serial.print("ms, ");
+  Serial.print(HEATER_PULSE_INTERVAL*3/4);
+  Serial.println("ms");
   Serial.println("GPIO28 set to HIGH (VREF) - for I2C pull-up resistors");
   Serial.println("Use VREF (Pin 35) for thermistor power, VREF (Pin 36) for I2C devices");
 }
@@ -389,6 +548,17 @@ void updateTemperatureControl() {
   if (currentTemperature > SAFETY_MAX_TEMP) {
     emergencyShutdown();
     return;
+  } else {
+    // Reset emergency warning when temperature is back to safe levels (with hysteresis)
+    static bool wasInEmergency = false;
+    if (wasInEmergency && currentTemperature < SAFETY_MAX_TEMP - 10) { // 10°C hysteresis
+      resetEmergencyWarning();
+      wasInEmergency = false;
+      Serial.println("Temperature returned to safe levels - emergency reset");
+    }
+    if (currentTemperature > SAFETY_MAX_TEMP - 5) { // Set flag when approaching danger
+      wasInEmergency = true;
+    }
   }
   
   // Enable heaters only if target temperature is reasonable
@@ -433,28 +603,50 @@ void updateHeaterControl() {
   
   unsigned long currentTime = millis();
   
-  // Pulse width modulation for temperature control
-  // Use heaterPower to determine on/off ratio within HEATER_PULSE_INTERVAL
-  unsigned long pulsePosition = currentTime % HEATER_PULSE_INTERVAL;
+  // Pulse width modulation with offset for each heater to reduce power supply stress
+  // Calculate on time for PWM
   unsigned long onTime = (unsigned long)(HEATER_PULSE_INTERVAL * heaterPower);
   
-  bool shouldBeOn = pulsePosition < onTime;
-  
   // Safety check - limit maximum continuous on time
-  if (shouldBeOn) {
-    if (heaterOnTime == 0) {
-      heaterOnTime = currentTime; // Start timing
-    } else if (currentTime - heaterOnTime > MAX_HEATER_ON_TIME) {
-      shouldBeOn = false; // Force off after max time
-      Serial.println("WARNING: Heater safety timeout - forcing OFF");
+  static bool safetyWarningShown = false;
+  static unsigned long anyHeaterOnTime = 0;
+  bool anyHeaterOn = false;
+  
+  // Apply individual offset control to each heater
+  for (int i = 0; i < 4; i++) {
+    // Offset each heater by 25% of pulse interval (evenly distributed)
+    unsigned long heaterOffset = (HEATER_PULSE_INTERVAL / 4) * i;
+    unsigned long offsetTime = (currentTime + heaterOffset) % HEATER_PULSE_INTERVAL;
+    
+    // Determine if this heater should be on based on its offset position
+    bool heaterShouldBeOn = offsetTime < onTime;
+    
+    // Track if any heater is on for safety timing
+    if (heaterShouldBeOn) {
+      anyHeaterOn = true;
     }
-  } else {
-    heaterOnTime = 0; // Reset timer when off
+    
+    setHeaterState(i, heaterShouldBeOn);
   }
   
-  // Apply the same control to all 4 heaters (can be modified for individual control)
-  for (int i = 0; i < 4; i++) {
-    setHeaterState(i, shouldBeOn);
+  // Safety timing based on any heater being on
+  if (anyHeaterOn) {
+    if (anyHeaterOnTime == 0) {
+      anyHeaterOnTime = currentTime; // Start timing
+      safetyWarningShown = false; // Reset warning flag for new heating cycle
+    } else if (currentTime - anyHeaterOnTime > MAX_HEATER_ON_TIME) {
+      // Force all heaters off after max time
+      for (int i = 0; i < 4; i++) {
+        setHeaterState(i, false);
+      }
+      if (!safetyWarningShown) {
+        Serial.println("WARNING: Heater safety timeout - forcing OFF for safety");
+        safetyWarningShown = true; // Only show warning once per timeout event
+      }
+    }
+  } else {
+    anyHeaterOnTime = 0; // Reset timer when all heaters off
+    safetyWarningShown = false; // Reset warning flag when heaters turn off normally
   }
   
   lastHeaterUpdate = currentTime;
@@ -472,12 +664,28 @@ void setHeaterState(int heaterIndex, bool state) {
     default: return;
   }
   
-  digitalWrite(pin, state ? HIGH : LOW);
+  // Low-triggered relays: LOW = relay ON, HIGH = relay OFF
+  digitalWrite(pin, state ? LOW : HIGH);
   heaterState[heaterIndex] = state;
 }
 
+// Global emergency warning flag
+static bool emergencyWarningShown = false;
+
+void resetEmergencyWarning() {
+  emergencyWarningShown = false;
+}
+
 void emergencyShutdown() {
-  Serial.println("EMERGENCY SHUTDOWN - Temperature too high!");
+  if (!emergencyWarningShown) {
+    Serial.println("EMERGENCY SHUTDOWN - Temperature too high!");
+    Serial.print("Current temperature: ");
+    Serial.print(currentTemperature);
+    Serial.print("°C exceeds safety limit of ");
+    Serial.print(SAFETY_MAX_TEMP);
+    Serial.println("°C");
+    emergencyWarningShown = true; // Only show emergency message once
+  }
   
   // Turn off all heaters immediately
   heatersEnabled = false;
@@ -488,13 +696,6 @@ void emergencyShutdown() {
   // Reset control variables
   heaterPower = 0;
   heaterOnTime = 0;
-  
-  // Visual indication on display would be good here
-  Serial.print("Current temperature: ");
-  Serial.print(currentTemperature);
-  Serial.print("°C exceeds safety limit of ");
-  Serial.print(SAFETY_MAX_TEMP);
-  Serial.println("°C");
 }
 
 
