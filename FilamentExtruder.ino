@@ -25,10 +25,8 @@
 #define POT1_ADDRESS 0x35
 #define POT2_ADDRESS 0x36
 
-// 10-bit: 0-1023
-// 12-bit: 0-4095
-// 16-bit: 0-65535
-#define POT_MAX_VALUE 4095
+#define POT_BIT_DEPTH 12
+#define POT_MAX_VALUE (1 << POT_BIT_DEPTH) - 1
 
 #define MAX_TEMPERATURE 300
 
@@ -100,7 +98,7 @@ void setup() {
   
   // Initialize thermistor
   pinMode(THERMISTOR_PIN, INPUT);
-  analogReadResolution(12);
+  analogReadResolution(POT_BIT_DEPTH);
 
   // Initialize I2C with custom pins
   initializeI2C();
@@ -247,9 +245,8 @@ uint16_t readPicoDevPot(uint8_t address) {
     // Combine bytes (MSB first)
     uint16_t result = (highByte << 8) | lowByte;
     
-    // PiicoDev Potentiometer typically returns 10-bit value (0-1023)
     // Mask to ensure we stay within expected range
-    result = result & 0x3FF; // Keep only lower 10 bits
+    result = result & ((1 << POT_BIT_DEPTH) - 1);
     
     return result;
   } else {
