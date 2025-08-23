@@ -99,6 +99,8 @@ void setup() {
   // Initialize thermistor
   pinMode(THERMISTOR_PIN, INPUT);
   analogReadResolution(POT_BIT_DEPTH);
+  delay(100); // Wait for ADC to settle
+  int throwaway = analogRead(THERMISTOR_PIN); // Throw away first reading
 
   // Initialize I2C with custom pins
   initializeI2C();
@@ -266,13 +268,10 @@ void updateDisplay() {
 
   // Safety status
   if (currentTemperature > SAFETY_MAX_TEMP - 20) {
-    display.setCursor(0, 62);
     display.println("! TOO HOT !");
   } else if (!heatersEnabled) {
-    display.setCursor(0, 62);
     display.println("Standby");
   } else {
-    display.setCursor(0, 62);
     display.println("Running");
   }
   
@@ -375,7 +374,7 @@ float readTemperature() {
   int raw = analogRead(THERMISTOR_PIN);
   
   // Calculate resistance using 3.3V reference
-  float voltage = raw * (SUPPLY_VOLTAGE / 1023.0);
+  float voltage = raw * (SUPPLY_VOLTAGE / POT_MAX_VALUE);
   float resistance = SERIES_RESISTOR * voltage / (SUPPLY_VOLTAGE - voltage);
   
   // Steinhart-Hart equation (same as before)
