@@ -43,7 +43,7 @@ function Resolve-ArduinoCliPath {
 
 function Ensure-Core-And-Libs([string]$cli) {
   $url = 'https://github.com/earlephilhower/arduino-pico/releases/download/global/package_rp2040_index.json'
-  Write-Info 'Initializing Arduino CLI config (idempotent)'
+  Write-Info 'Initializing Arduino CLI config'
   & $cli config init | Out-Null
   & $cli config set board_manager.additional_urls $url | Out-Null
   Write-Info 'Updating core index'
