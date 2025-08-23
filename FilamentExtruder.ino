@@ -5,7 +5,6 @@
 
 // WiFi functionality can be added later by uncommenting:
 // #include <WiFi.h>
-// Note: Update WiFi credentials in platformio.ini if needed
 
 // Thermistor constants (powered by VREF)
 #define THERMISTOR_PIN A0
@@ -165,7 +164,9 @@ void loop() {
 
 void initializeI2C() {
   // Initialize I2C with custom pins (SDA=GPIO8, SCL=GPIO9)
-  // Pins are configured via build flags in platformio.ini
+  // In Arduino IDE, configure pins explicitly before begin
+  Wire.setSDA(8);
+  Wire.setSCL(9);
   Wire.begin();
   
   // Enable internal pull-ups as temporary test (weak, but might work for testing)
@@ -499,3 +500,5 @@ void emergencyShutdown() {
   Serial.print(SAFETY_MAX_TEMP);
   Serial.println("°C");
 }
+
+

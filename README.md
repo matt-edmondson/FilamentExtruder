@@ -1,7 +1,3 @@
----
-status: draft
----
-
 # Raspberry Pi Pico W Filament Extruder Controller
 
 An Arduino-based filament extruder controller for the Raspberry Pi Pico W featuring custom I2C configuration, SSD1306 display, analog control inputs, and 4-channel relay heater control. Perfect for 3D printing applications requiring precise temperature control and speed monitoring for filament extrusion.
@@ -16,16 +12,25 @@ An Arduino-based filament extruder controller for the Raspberry Pi Pico W featur
 - **Real-time Monitoring**: Live temperature, speed, and heater status display
 - **Safety Features**: Emergency shutdown, maximum temperature limits, heater timeouts
 - **Serial Debugging**: Comprehensive debug output with heater status
-- **Automated Build Scripts**: PowerShell and Batch scripts for easy deployment
+- **Automated Build Scripts**: PowerShell scripts for easy deployment
 
-## Quick Start
+## Quick Start (Arduino IDE)
 
-1. **Connect Hardware**: Wire up your Pico W, SSD1306 display, and ADC modules according to the wiring diagram
-2. **Run Build Script**: Execute `PowerShell -ExecutionPolicy Bypass -File build_and_deploy.ps1`
-3. **Upload to Pico**: Hold BOOTSEL button while connecting USB, then let the script deploy
-4. **Monitor Operation**: Connect to serial monitor at 115200 baud or watch the OLED display
-
-The PowerShell script will automatically install Python and PlatformIO if needed!
+1. **Install Arduino IDE**: Download from `https://www.arduino.cc/en/software`.
+2. **Install RP2040 Support**:
+   - File → Preferences → Additional Boards Manager URLs → add `https://github.com/earlephilhower/arduino-pico/releases/download/global/package_rp2040_index.json`
+   - Tools → Board → Boards Manager… → search "rp2040" → install "Raspberry Pi Pico/RP2040 by Earle F. Philhower, III"
+3. **Select Board and Port**:
+   - Tools → Board: Raspberry Pi Pico W
+   - Tools → USB Stack: Pico SDK
+   - Tools → Port: your Pico’s COM port
+4. **Install Libraries** (Sketch → Include Library → Manage Libraries…):
+   - Adafruit SSD1306
+   - Adafruit GFX Library
+   - Adafruit BusIO
+5. **Open the Sketch**: Open `FilamentExtruder.ino` at the project root
+6. **Upload**: Click Upload. If needed, hold BOOTSEL while connecting USB to enter bootloader.
+7. **Monitor**: Tools → Serial Monitor at 115200 baud.
 
 ## Hardware Requirements
 
@@ -36,7 +41,7 @@ The PowerShell script will automatically install Python and PlatformIO if needed
 - 2x Analog potentiometers (10kΩ recommended)
 - 4x Relay modules (for heater control)
 - 4x Heating elements (cartridge heaters, resistive heaters, etc.)
-- 1x Thermistor (10kΩ NTC) with series resistor for temperature sensing
+- 1x Thermistor (100kΩ NTC) with series resistor for temperature sensing
 - Breadboard and jumper wires
 
 ### I2C Addresses
@@ -89,88 +94,49 @@ Analog Potentiometer Connections:
 └─────────────────┴─────────┴─────────┘
 ```
 
-## Software Setup
+## Build & Deploy (Arduino CLI via PowerShell)
 
-### Automated Build & Deploy (Recommended)
+Use the provided PowerShell script to build and deploy with Arduino CLI (auto-installed locally if missing).
 
-#### Option 1: PowerShell Script (Full automation)
-Run the comprehensive PowerShell script that handles everything:
+### One-time
+- Windows PowerShell (7+ recommended)
+- Internet access (downloads Arduino CLI/core/libs on first run)
+
+### Commands
 ```powershell
-PowerShell -ExecutionPolicy Bypass -File build_and_deploy.ps1
+# Build and wait for RPI-RP2 drive, then copy UF2 automatically
+.\build_and_deploy_arduino.ps1
+
+# Build only (no deploy)
+.\build_and_deploy_arduino.ps1 -BuildOnly
+
+# Upload via serial (if you prefer COM upload)
+.\build_and_deploy_arduino.ps1 -Port COM7
+
+# Customize board or output directory
+.\build_and_deploy_arduino.ps1 -Fqbn 'rp2040:rp2040:rpipicow:usbstack=picosdk' -OutputDir .\build
 ```
 
-**Features:**
-- Automatically installs Python if missing
-- Automatically installs PlatformIO if missing
-- Builds the project
-- Deploys to connected Pico W
-- Comprehensive error handling and feedback
+### How it works
+- Installs a portable `arduino-cli` into `.tools` if not found
+- Adds RP2040 board manager URL and installs `rp2040:rp2040`
+- Ensures libraries: Adafruit SSD1306, Adafruit GFX Library, Adafruit BusIO
+- Compiles `FilamentExtruder.ino` (root-level)
+- Deploys by either:
+  - Copying the UF2 to the `RPI-RP2` mass storage device (hold BOOTSEL while plugging in USB)
+  - Or uploading over the specified `-Port`
 
-**Script Options:**
-```powershell
-# Build only (no deployment)
-.\build_and_deploy.ps1 -BuildOnly
-
-# Skip installation checks (if you know PlatformIO is installed)
-.\build_and_deploy.ps1 -SkipInstall
-
-# Verbose output for debugging
-.\build_and_deploy.ps1 -Verbose
-```
-
-#### Option 2: Test Your Setup First
-Before building, you can test if everything is properly installed:
-```powershell
-.\test_setup.ps1
-```
-
-#### Option 2b: Fix PlatformIO Issues
-If you encounter build errors (like MissingPackageManifestError):
-```powershell
-# Standard repair (try this first)
-.\repair_platformio.ps1
-
-# Nuclear repair (if standard repair fails)
-.\nuclear_repair.ps1
-```
-
-#### Option 3: Batch Script (Simple)
-For users who prefer batch files:
-```cmd
-build_and_deploy.bat
-```
-
-**Note:** This requires PlatformIO to be pre-installed.
-
-### Manual Installation
-If you prefer manual setup:
-
-#### Prerequisites
-- Python 3.7+ with pip
-- PlatformIO Core (`python -m pip install platformio`)
-- Arduino framework for Raspberry Pi Pico
-
-#### Manual Build & Deploy
-1. Clone or download this project
-2. Open terminal in project directory
-3. Build: `pio run`
-4. Deploy: `pio run --target upload`
+### Script options
+- `-BuildOnly`: Build but skip deploy
+- `-Port <COMx>`: Force serial upload
+- `-TimeoutSeconds <n>`: Wait time for `RPI-RP2` drive (default 60)
+- `-Fqbn <id>`: Fully Qualified Board Name (default Pico W with Pico SDK stack)
+- `-OutputDir <path>`: UF2 output directory (default `.\\build`)
+- `-CliPath <path>`: Use a specific `arduino-cli.exe`
+- `-Sketch <path>`: Explicit sketch path (not required when `FilamentExtruder.ino` is in repo root)
 
 ### Configuration
-The project uses custom I2C pins defined in `platformio.ini`:
-```ini
-build_flags = 
-    -DPIN_WIRE_SDA=8
-    -DPIN_WIRE_SCL=9
-    -DPICO_W
-```
-
-**WiFi Configuration (Optional):**
-If you want to add WiFi functionality later, update the WiFi credentials in `platformio.ini`:
-```ini
--DWIFI_SSID=\"YourNetworkName\"
--DWIFI_PASSWORD=\"YourPassword\"
-```
+I2C pins are configured in `FilamentExtruder.ino` using `Wire.setSDA(8)` and `Wire.setSCL(9)` before `Wire.begin()`. If your OLED uses `0x3D`, change `SCREEN_ADDRESS` in the sketch. WiFi is currently disabled; to add later, include `#include <WiFi.h>` and configure credentials in code.
 
 ## Usage
 
@@ -273,7 +239,7 @@ Enable serial debugging by connecting to the Pico W at 115200 baud. All major op
 ## Customization
 
 ### Changing I2C Pins
-Modify the pins in both `platformio.ini` and `main.cpp`:
+Modify the pins in `FilamentExtruder.ino`:
 ```cpp
 Wire.setSDA(your_sda_pin);
 Wire.setSCL(your_scl_pin);

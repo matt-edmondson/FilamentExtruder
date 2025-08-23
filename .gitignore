@@ -5,6 +5,9 @@
 .piolibdeps/
 .platformio/
 
+# tools
+.tools/
+
 # Build directories
 build/
 .build/
