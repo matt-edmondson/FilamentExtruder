@@ -84,7 +84,13 @@ void updateTemperatureControl();
 
 void setup() {
   Serial.begin(115200);
-  delay(1000);
+  
+  // Wait for serial connection to be established (max 10 seconds)
+  // This ensures we don't miss initial log messages
+  unsigned long startTime = millis();
+  while (!Serial && (millis() - startTime < 10000)) {
+    delay(100);  // Small delay to prevent tight loop
+  }
   
   Serial.println("Raspberry Pi Pico W I2C Project Starting...");
   

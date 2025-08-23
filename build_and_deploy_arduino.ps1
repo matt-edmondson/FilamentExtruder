@@ -486,6 +486,8 @@ try {
                     Write-Warn "Could not detect serial port for monitoring; using specified port $Port"
                     $monitorPort = $Port 
                 }
+                Write-Info "Waiting 2 seconds for device to initialize..."
+                Start-Sleep -Seconds 2
                 Start-SerialMonitor -CliPath $arduinoCliPath -Port $monitorPort -BaudRate $Baud
             }
             exit 0
@@ -506,6 +508,8 @@ try {
                 Copy-FirmwareViaSerial -CliPath $arduinoCliPath -SketchPath $sketchPath -BoardFqbn $Fqbn -Port $candidate
                 
                 if (-not $NoMonitor) {
+                    Write-Info "Waiting 2 seconds for device to initialize..."
+                    Start-Sleep -Seconds 2
                     Start-SerialMonitor -CliPath $arduinoCliPath -Port $candidate -BaudRate $Baud
                 }
                 exit 0
@@ -527,6 +531,8 @@ try {
         
         if ($availablePorts -and $availablePorts.Length -gt 0) {
             $monitorPort = $availablePorts[0]  # Use first available port
+            Write-Info "Waiting 3 seconds for device to initialize after mass storage deployment..."
+            Start-Sleep -Seconds 3
             Start-SerialMonitor -CliPath $arduinoCliPath -Port $monitorPort -BaudRate $Baud
         } else {
             Write-Warn 'No serial ports detected after deployment. Connect manually if needed.'
