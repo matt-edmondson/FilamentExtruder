@@ -170,15 +170,15 @@ void initializeI2C() {
   Wire.begin();
   
   // Enable internal pull-ups as temporary test (weak, but might work for testing)
-  pinMode(8, INPUT_PULLUP);  // SDA
-  pinMode(9, INPUT_PULLUP);  // SCL
+  // pinMode(8, INPUT_PULLUP);  // SDA
+  // pinMode(9, INPUT_PULLUP);  // SCL
   
   // Set normal I2C clock now that we're bypassing PiicoDev series resistors
-  Wire.setClock(100000); // 100kHz - standard I2C speed
+  //Wire.setClock(100000); // 100kHz - standard I2C speed
   
   Serial.println("I2C initialized on SDA=GPIO8, SCL=GPIO9");
-  Serial.println("I2C clock set to 100kHz - bypassing PiicoDev series resistors");
-  Serial.println("WARNING: Using internal pull-ups - add 4.7k external resistors for reliable operation");
+  //Serial.println("I2C clock set to 100kHz - bypassing PiicoDev series resistors");
+  //Serial.println("WARNING: Using internal pull-ups - add 4.7k external resistors for reliable operation");
 }
 
 void initializeDisplay() {
@@ -244,7 +244,18 @@ void updateDisplay() {
   // Title
   display.setTextSize(1);
   display.setCursor(0, 0);
-  display.println("Filament Extruder");
+
+  // Safety status
+  if (currentTemperature > SAFETY_MAX_TEMP - 20) {
+    display.setCursor(0, 62);
+    display.println("! TOO HOT !");
+  } else if (!heatersEnabled) {
+    display.setCursor(0, 62);
+    display.println("Standby");
+  } else {
+    display.setCursor(0, 62);
+    display.println("Running");
+  }
   
   // Draw line separator
   display.drawLine(0, 10, SCREEN_WIDTH-1, 10, SSD1306_WHITE);
@@ -276,25 +287,15 @@ void updateDisplay() {
   
   // Heater status indicators
   display.setCursor(0, 52);
-  display.print("Heaters: ");
+  display.print("Heat: ");
   for (int i = 0; i < 4; i++) {
     display.print(heaterState[i] ? "1" : "0");
   }
   
   // Power indicator
-  display.setCursor(70, 52);
-  display.print("Pwr:");
+  display.print(" ");
   display.print((int)(heaterPower * 100));
   display.print("%");
-  
-  // Safety status
-  if (currentTemperature > SAFETY_MAX_TEMP - 20) {
-    display.setCursor(0, 62);
-    display.print("! HOT !");
-  } else if (!heatersEnabled) {
-    display.setCursor(0, 62);
-    display.print("STANDBY");
-  }
 
   display.display();
 }
