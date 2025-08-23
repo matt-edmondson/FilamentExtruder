@@ -53,14 +53,12 @@
 
 // Temperature control settings
 #define TARGET_TEMP_DEFAULT 220    // Default target temperature in Celsius
-#define MIN_TARGET_TEMP 30         // Minimum target temperature to enable heaters (prevents accidental heating)
+#define MIN_TARGET_TEMP 10         // Minimum target temperature to enable heaters (prevents accidental heating)
 #define TEMP_TOLERANCE 2           // Temperature tolerance in degrees
 #define HEATER_PULSE_INTERVAL 1000 // Pulse interval in milliseconds
 #define MAX_HEATER_ON_TIME 30000   // Maximum continuous heater on time (30 seconds)
 #define SAFETY_MAX_TEMP 350        // Safety shutdown temperature
-#define MAX_DUTY_CYCLE 0.85        // Maximum heater duty cycle (85% - prevents 100% on time)
-#define USE_SMART_PWM false         // true = Smart PWM (sequential <50%, overlapping >50%)
-                                   // false = Simple PWM (overlapping at all power levels)
+#define MAX_DUTY_CYCLE 0.95        // Maximum heater duty cycle (85% - prevents 100% on time)
 
 // Control variables
 int targetSpeed = 0;
@@ -572,11 +570,7 @@ void initializeHeaters() {
   Serial.print("Maximum duty cycle limited to: ");
   Serial.print(MAX_DUTY_CYCLE * 100, 1);
   Serial.println("% (prevents relay overheating)");
-  if (USE_SMART_PWM) {
-    Serial.println("Smart PWM: Low power (<50%) uses sequential heating, High power (>50%) uses overlapping");
-  } else {
-    Serial.println("Simple PWM: All power levels use traditional overlapping heating");
-  }
+  Serial.println("Offset PWM: Natural sequential at low power, overlapping at high power");
   Serial.print("Temperature range: ");
   Serial.print(MIN_TARGET_TEMP);
   Serial.print("°C - ");
@@ -758,34 +752,10 @@ void updateHeaterControl() {
     bool heaterShouldBeOn = false;
     
     if (!safetyTimeoutActive) {
-      if (USE_SMART_PWM) {
-        // Smart offset PWM - ensures continuous coverage at low power
-        unsigned long heaterOffset;
-        
-        if (heaterPower <= 0.5) {
-          // Low power: Distribute heaters sequentially for continuous coverage
-          // Each heater gets equal share of the cycle time
-          unsigned long heaterInterval = HEATER_PULSE_INTERVAL / NUM_HEATERS;
-          unsigned long heaterOnTime = onTime / NUM_HEATERS; // Divide on-time among connected heaters
-          
-          heaterOffset = heaterInterval * i;
-          unsigned long offsetTime = (currentTime + heaterOffset) % HEATER_PULSE_INTERVAL;
-          
-          // Each heater is on for its portion of the total on-time
-          heaterShouldBeOn = offsetTime < heaterOnTime;
-          
-        } else {
-          // High power: Use overlapping offsets for more power
-          heaterOffset = (HEATER_PULSE_INTERVAL / NUM_HEATERS) * i;
-          unsigned long offsetTime = (currentTime + heaterOffset) % HEATER_PULSE_INTERVAL;
-          heaterShouldBeOn = offsetTime < onTime;
-        }
-      } else {
-        // Simple PWM: All heaters use traditional overlapping PWM at all power levels
-        unsigned long heaterOffset = (HEATER_PULSE_INTERVAL / NUM_HEATERS) * i;
-        unsigned long offsetTime = (currentTime + heaterOffset) % HEATER_PULSE_INTERVAL;
-        heaterShouldBeOn = offsetTime < onTime;
-      }
+      // Offset PWM: Natural sequential at low power, overlapping at high power
+      unsigned long heaterOffset = (HEATER_PULSE_INTERVAL / NUM_HEATERS) * i;
+      unsigned long offsetTime = (currentTime + heaterOffset) % HEATER_PULSE_INTERVAL;
+      heaterShouldBeOn = offsetTime < onTime;
     }
     // If safety timeout active, heaterShouldBeOn stays false
     
