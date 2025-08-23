@@ -42,8 +42,18 @@
 #define HEATER_3_PIN 20
 #define HEATER_4_PIN 21
 
+// Configure how many heaters you have connected (1-4)
+#define NUM_HEATERS 4  // Change this to match your setup: 1, 2, 3, or 4
+
+// Configuration examples:
+// #define NUM_HEATERS 1  // Single heater on GPIO18
+// #define NUM_HEATERS 2  // Two heaters on GPIO18-19  
+// #define NUM_HEATERS 3  // Three heaters on GPIO18-20
+// #define NUM_HEATERS 4  // Four heaters on GPIO18-21 (maximum)
+
 // Temperature control settings
 #define TARGET_TEMP_DEFAULT 220    // Default target temperature in Celsius
+#define MIN_TARGET_TEMP 30         // Minimum target temperature to enable heaters (prevents accidental heating)
 #define TEMP_TOLERANCE 2           // Temperature tolerance in degrees
 #define HEATER_PULSE_INTERVAL 1000 // Pulse interval in milliseconds
 #define MAX_HEATER_ON_TIME 30000   // Maximum continuous heater on time (30 seconds)
@@ -57,7 +67,7 @@ float currentTemperature = 0;
 bool heatersEnabled = false;
 unsigned long lastHeaterUpdate = 0;
 unsigned long heaterOnTime = 0;
-bool heaterState[4] = {false, false, false, false};
+bool heaterState[4] = {false, false, false, false};  // Support up to 4, use NUM_HEATERS
 
 // PID-like control variables
 float temperatureError = 0;
@@ -91,6 +101,11 @@ void updateTemperatureControl();
 
 void setup() {
   Serial.begin(115200);
+  
+  // Validate configuration
+  #if NUM_HEATERS < 1 || NUM_HEATERS > 4
+    #error "NUM_HEATERS must be between 1 and 4"
+  #endif
   
   // Wait for serial connection to be established (max 10 seconds)
   // This ensures we don't miss initial log messages
@@ -179,13 +194,13 @@ void loop() {
   if (fabs(currentTemperature - lastCurrentTemp) > 1.0) valuesChanged = true; // Temp reading change > 1°C
   if (fabs(heaterPower - lastHeaterPower) > 0.05) valuesChanged = true;        // Power change > 5%
   
-  // Check if heater states changed
-  for (int i = 0; i < 4; i++) {
-    if (heaterState[i] != lastHeaterStates[i]) {
-      valuesChanged = true;
-      break;
+      // Check if heater states changed
+    for (int i = 0; i < NUM_HEATERS; i++) {
+      if (heaterState[i] != lastHeaterStates[i]) {
+        valuesChanged = true;
+        break;
+      }
     }
-  }
   
   // Print debug info when values change OR every 10 seconds when stable (reduce spam)
   if (valuesChanged || (millis() - lastDebug > 10000)) {
@@ -201,14 +216,16 @@ void loop() {
     Serial.print(targetTemperature);
     Serial.print("°C | Heater Power: ");
     Serial.print(heaterPower * 100, 1);
-    Serial.print("% | Heaters (offset): H1:");
-    Serial.print(heaterState[0] ? "ON" : "OFF");
-    Serial.print(" H2:");
-    Serial.print(heaterState[1] ? "ON" : "OFF");
-    Serial.print(" H3:");
-    Serial.print(heaterState[2] ? "ON" : "OFF");
-    Serial.print(" H4:");
-    Serial.print(heaterState[3] ? "ON" : "OFF");
+    Serial.print("% | Heaters (");
+    Serial.print(NUM_HEATERS);
+    Serial.print(" connected): ");
+    for (int i = 0; i < NUM_HEATERS; i++) {
+      Serial.print("H");
+      Serial.print(i + 1);
+      Serial.print(":");
+      Serial.print(heaterState[i] ? "ON" : "OFF");
+      if (i < NUM_HEATERS - 1) Serial.print(" ");
+    }
     Serial.println();
     
     // Update last values
@@ -216,7 +233,7 @@ void loop() {
     lastTargetTemp = targetTemperature;
     lastCurrentTemp = currentTemperature;
     lastHeaterPower = heaterPower;
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < NUM_HEATERS; i++) {
       lastHeaterStates[i] = heaterState[i];
     }
     
@@ -515,36 +532,50 @@ float readTemperature() {
 }
 
 void initializeHeaters() {
-  // Configure GPIO pins 18-21 as outputs for relay control
-  pinMode(HEATER_1_PIN, OUTPUT);
-  pinMode(HEATER_2_PIN, OUTPUT);
-  pinMode(HEATER_3_PIN, OUTPUT);
-  pinMode(HEATER_4_PIN, OUTPUT);
+  // Configure GPIO pins as outputs for relay control (only the ones you're using)
+  if (NUM_HEATERS >= 1) pinMode(HEATER_1_PIN, OUTPUT);
+  if (NUM_HEATERS >= 2) pinMode(HEATER_2_PIN, OUTPUT);
+  if (NUM_HEATERS >= 3) pinMode(HEATER_3_PIN, OUTPUT);
+  if (NUM_HEATERS >= 4) pinMode(HEATER_4_PIN, OUTPUT);
   
   // Configure GPIO28 as VREF output (limited current)
   pinMode(28, OUTPUT);
   digitalWrite(28, HIGH);  // Set GPIO28 to VREF
   
-  // Initialize all heaters to OFF (HIGH = OFF for low-triggered relays)
-  digitalWrite(HEATER_1_PIN, HIGH);
-  digitalWrite(HEATER_2_PIN, HIGH);
-  digitalWrite(HEATER_3_PIN, HIGH);
-  digitalWrite(HEATER_4_PIN, HIGH);
+  // Initialize connected heaters to OFF (HIGH = OFF for low-triggered relays)
+  if (NUM_HEATERS >= 1) digitalWrite(HEATER_1_PIN, HIGH);
+  if (NUM_HEATERS >= 2) digitalWrite(HEATER_2_PIN, HIGH);
+  if (NUM_HEATERS >= 3) digitalWrite(HEATER_3_PIN, HIGH);
+  if (NUM_HEATERS >= 4) digitalWrite(HEATER_4_PIN, HIGH);
   
-  Serial.println("Heater control pins initialized (GPIO18-21)");
-  Serial.println("All heaters initialized to OFF state (HIGH = OFF for low-triggered relays)");
+  Serial.print("Heater control pins initialized: ");
+  Serial.print(NUM_HEATERS);
+  Serial.print(" heater(s) connected on GPIO18");
+  if (NUM_HEATERS > 1) Serial.print("-");
+  if (NUM_HEATERS > 1) Serial.print(17 + NUM_HEATERS);
+  Serial.println();
+  Serial.println("All connected heaters initialized to OFF state (HIGH = OFF for low-triggered relays)");
+  
   Serial.print("Heater pulse interval: ");
   Serial.print(HEATER_PULSE_INTERVAL);
-  Serial.print("ms, Offsets: 0ms, ");
-  Serial.print(HEATER_PULSE_INTERVAL/4);
-  Serial.print("ms, ");
-  Serial.print(HEATER_PULSE_INTERVAL/2);
-  Serial.print("ms, ");
-  Serial.print(HEATER_PULSE_INTERVAL*3/4);
-  Serial.println("ms");
+  Serial.print("ms, Offsets for ");
+  Serial.print(NUM_HEATERS);
+  Serial.print(" heaters: ");
+  for (int i = 0; i < NUM_HEATERS; i++) {
+    Serial.print((HEATER_PULSE_INTERVAL / NUM_HEATERS) * i);
+    Serial.print("ms");
+    if (i < NUM_HEATERS - 1) Serial.print(", ");
+  }
+  Serial.println();
   Serial.print("Maximum duty cycle limited to: ");
   Serial.print(MAX_DUTY_CYCLE * 100, 1);
   Serial.println("% (prevents relay overheating)");
+  Serial.println("Smart PWM: Low power (<50%) uses sequential heating, High power (>50%) uses overlapping");
+  Serial.print("Temperature range: ");
+  Serial.print(MIN_TARGET_TEMP);
+  Serial.print("°C - ");
+  Serial.print(SAFETY_MAX_TEMP);
+  Serial.println("°C");
   Serial.println("GPIO28 set to HIGH (VREF) - for I2C pull-up resistors");
   Serial.println("Use VREF (Pin 35) for thermistor power, VREF (Pin 36) for I2C devices");
 }
@@ -572,7 +603,7 @@ void updateTemperatureControl() {
   
   // Enable heaters only if target temperature is reasonable
   static bool lastHeatersEnabled = false;
-  if (targetTemperature > 50 && targetTemperature < SAFETY_MAX_TEMP) {
+  if (targetTemperature > MIN_TARGET_TEMP && targetTemperature < SAFETY_MAX_TEMP) {
     heatersEnabled = true;
   } else {
     heatersEnabled = false;
@@ -656,8 +687,8 @@ void updateHeaterControl() {
   static bool wasDisabled = false;
   
   if (!heatersEnabled) {
-    // Turn off all heaters if disabled
-    for (int i = 0; i < 4; i++) {
+    // Turn off all connected heaters if disabled
+    for (int i = 0; i < NUM_HEATERS; i++) {
       setHeaterState(i, false);
     }
     
@@ -668,7 +699,9 @@ void updateHeaterControl() {
       anyHeaterOnTime = 0;
       safetyWarningShown = false;
       Serial.println("  -> Heaters DISABLED - clearing all safety timeout states");
-      Serial.println("  -> MANUAL RESET: Turn temp pot to minimum and back up to clear any stuck states");
+      Serial.print("  -> MANUAL RESET: Turn temp pot below ");
+      Serial.print(MIN_TARGET_TEMP);
+      Serial.println("°C and back up to clear any stuck states");
       wasDisabled = true;
     }
     
@@ -714,15 +747,32 @@ void updateHeaterControl() {
     }
   }
   
-  // Apply individual offset control to each heater (but override if safety timeout)
-  for (int i = 0; i < 4; i++) {
+  // Apply individual offset control to each connected heater (but override if safety timeout)
+  for (int i = 0; i < NUM_HEATERS; i++) {
     bool heaterShouldBeOn = false;
     
     if (!safetyTimeoutActive) {
-      // Normal PWM operation
-      unsigned long heaterOffset = (HEATER_PULSE_INTERVAL / 4) * i;
-      unsigned long offsetTime = (currentTime + heaterOffset) % HEATER_PULSE_INTERVAL;
-      heaterShouldBeOn = offsetTime < onTime;
+      // Smart offset PWM - ensures continuous coverage at low power
+      unsigned long heaterOffset;
+      
+      if (heaterPower <= 0.5) {
+        // Low power: Distribute heaters sequentially for continuous coverage
+        // Each heater gets equal share of the cycle time
+        unsigned long heaterInterval = HEATER_PULSE_INTERVAL / NUM_HEATERS;
+        unsigned long heaterOnTime = onTime / NUM_HEATERS; // Divide on-time among connected heaters
+        
+        heaterOffset = heaterInterval * i;
+        unsigned long offsetTime = (currentTime + heaterOffset) % HEATER_PULSE_INTERVAL;
+        
+        // Each heater is on for its portion of the total on-time
+        heaterShouldBeOn = offsetTime < heaterOnTime;
+        
+      } else {
+        // High power: Use overlapping offsets for more power
+        heaterOffset = (HEATER_PULSE_INTERVAL / NUM_HEATERS) * i;
+        unsigned long offsetTime = (currentTime + heaterOffset) % HEATER_PULSE_INTERVAL;
+        heaterShouldBeOn = offsetTime < onTime;
+      }
     }
     // If safety timeout active, heaterShouldBeOn stays false
     
@@ -802,7 +852,7 @@ void updateHeaterControl() {
 }
 
 void setHeaterState(int heaterIndex, bool state) {
-  if (heaterIndex < 0 || heaterIndex > 3) return;
+  if (heaterIndex < 0 || heaterIndex >= NUM_HEATERS) return;
   
   int pin;
   switch (heaterIndex) {
@@ -850,7 +900,7 @@ void emergencyShutdown() {
   
   // Turn off all heaters immediately
   heatersEnabled = false;
-  for (int i = 0; i < 4; i++) {
+  for (int i = 0; i < NUM_HEATERS; i++) {
     setHeaterState(i, false);
   }
   
