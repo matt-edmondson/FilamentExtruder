@@ -252,18 +252,18 @@ void updateDisplay() {
   // Speed control
   display.setCursor(0, 14);
   display.setTextSize(1);
-  display.print("Speed: ");
+  display.print("Speed Set: ");
   display.print(targetSpeed);
   display.print(" RPM");
   
   // Temperature info
   display.setCursor(0, 24);
-  display.print("Target: ");
+  display.print("Temp Targ: ");
   display.print(targetTemperature);
   display.print("C");
   
   display.setCursor(0, 34);
-  display.print("Current: ");
+  display.print("Temp Curr: ");
   display.print(currentTemperature, 1);
   display.print("C");
   
@@ -278,7 +278,7 @@ void updateDisplay() {
   display.setCursor(0, 52);
   display.print("Heaters: ");
   for (int i = 0; i < 4; i++) {
-    display.print(heaterState[i] ? "█" : "□");
+    display.print(heaterState[i] ? "1" : "0");
   }
   
   // Power indicator
@@ -315,7 +315,7 @@ void scanI2CDevices() {
       // Add known device identification
       if (address == 0x3C || address == 0x3D) {
         Serial.print(" (SSD1306 OLED)");
-      } else if (address == 0x10 || address == 0x11) {
+      } else if (address == 0x35 || address == 0x36) {
         Serial.print(" (PiicoDev Potentiometer)");
       }
       Serial.println();
@@ -334,9 +334,8 @@ void scanI2CDevices() {
   if (deviceCount == 0) {
     Serial.println("No I2C devices found - Check wiring and pull-up resistors!");
     Serial.println("Expected devices:");
-    Serial.println("  - 0x3D: SSD1306 Display");
-    Serial.println("  - 0x10: PiicoDev Potentiometer #1");  
-    Serial.println("  - 0x11: PiicoDev Potentiometer #2");
+    Serial.println("  - 0x3C/0x3D: SSD1306 Display");
+    Serial.println("  - 0x35/0x36: PiicoDev Potentiometer");  
   } else {
     Serial.print("Found ");
     Serial.print(deviceCount);
