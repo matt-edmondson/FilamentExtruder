@@ -13,6 +13,8 @@
 #define TEMPERATURE_NOMINAL 25
 #define B_COEFFICIENT 3950
 #define SUPPLY_VOLTAGE 3.3  // VREF is typically 3.3V 
+#define ADC_BIT_DEPTH 10
+#define ADC_MAX_VALUE (1 << ADC_BIT_DEPTH) - 1
 
 // Display configuration
 #define SCREEN_WIDTH 128
@@ -98,7 +100,7 @@ void setup() {
   
   // Initialize thermistor
   pinMode(THERMISTOR_PIN, INPUT);
-  analogReadResolution(POT_BIT_DEPTH);
+  analogReadResolution(ADC_BIT_DEPTH);
   delay(100); // Wait for ADC to settle
   int throwaway = analogRead(THERMISTOR_PIN); // Throw away first reading
 
@@ -383,7 +385,7 @@ float readTemperature() {
   
   float averageRaw = sum / (float)numSamples;
   
-  float voltage = averageRaw * (SUPPLY_VOLTAGE / POT_MAX_VALUE);
+  float voltage = averageRaw * (SUPPLY_VOLTAGE / ADC_MAX_VALUE);
 
   // Pull-up configuration: 4.7k resistor from VREF to A0, thermistor from A0 to GND
   // Voltage divider: V_A0 = VREF × (R_thermistor / (R_series + R_thermistor))
