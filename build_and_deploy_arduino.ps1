@@ -2,6 +2,9 @@ Param(
   [switch]$BuildOnly,
   [string]$Port,
   [int]$TimeoutSeconds = 60,
+  [int]$MonitorTimeoutSeconds = 60,
+  [int]$Baud = 115200,
+  [switch]$NoMonitor,
   [string]$CliPath,
   [string]$Fqbn = 'rp2040:rp2040:rpipicow:usbstack=picosdk',
   [string]$OutputDir = '.\\build',
@@ -48,7 +51,7 @@ function Ensure-Core-And-Libs([string]$cli) {
   & $cli config set board_manager.additional_urls $url | Out-Null
   Write-Info 'Updating core index'
   & $cli core update-index | Out-Null
-  Write-Info 'Installing RP2040 core if missing'
+  Write-Info 'Ensuring RP2040 core is installed'
   & $cli core install rp2040:rp2040 | Out-Null
 
   $libs = @('Adafruit SSD1306','Adafruit GFX Library','Adafruit BusIO')
@@ -143,6 +146,39 @@ function Upload-ViaSerial([string]$cli, [string]$sketch, [string]$fqbn, [string]
   & $cli upload --fqbn $fqbn -p $port $sketch
 }
 
+function Get-SerialPortList {
+  $ports = @()
+  try {
+    $cim = Get-CimInstance Win32_SerialPort -ErrorAction Stop | ForEach-Object { $_.DeviceID }
+    if ($cim) { $ports += $cim }
+  } catch {}
+  try {
+    $dotnet = [System.IO.Ports.SerialPort]::GetPortNames()
+    if ($dotnet) { $ports += $dotnet }
+  } catch {}
+  return ($ports | Sort-Object -Unique)
+}
+
+function Wait-ForSerialPort([string[]]$baseline, [string]$preferredPort, [int]$timeoutSec) {
+  $deadline = (Get-Date).AddSeconds($timeoutSec)
+  while ((Get-Date) -lt $deadline) {
+    $now = Get-SerialPortList
+    if ($preferredPort) {
+      if ($now -contains $preferredPort) { return $preferredPort }
+    } else {
+      $newPorts = $now | Where-Object { $baseline -notcontains $_ }
+      if ($newPorts) { return ($newPorts | Select-Object -First 1) }
+    }
+    Start-Sleep -Milliseconds 300
+  }
+  return $null
+}
+
+function Start-SerialMonitor([string]$cli, [string]$port, [int]$baud) {
+  Write-Info "Starting serial monitor on $port @ ${baud} baud (Ctrl+C to exit)"
+  & $cli monitor -p $port -c "baud=$baud"
+}
+
 try {
   $cli = Resolve-ArduinoCliPath
   Write-Info "Using arduino-cli: $cli"
@@ -155,9 +191,16 @@ try {
 
   if ($BuildOnly) { Write-Info 'BuildOnly specified. Skipping deploy.'; exit 0 }
 
+  $baselinePorts = Get-SerialPortList
+
   if ($Port) {
     try {
       Upload-ViaSerial -cli $cli -sketch $sketchPath -fqbn $Fqbn -port $Port
+      if (-not $NoMonitor) {
+        $monitorPort = Wait-ForSerialPort -baseline $baselinePorts -preferredPort $Port -timeoutSec $MonitorTimeoutSeconds
+        if (-not $monitorPort) { Write-Warn "Could not detect serial port for monitor; trying provided port $Port"; $monitorPort = $Port }
+        Start-SerialMonitor -cli $cli -port $monitorPort -baud $Baud
+      }
       exit 0
     } catch {
       Write-Warn "Serial upload failed: $($_.Exception.Message). Falling back to UF2 mass-storage copy."
@@ -165,6 +208,15 @@ try {
   }
 
   Upload-ViaMassStorage -uf2 $uf2 -timeoutSec $TimeoutSeconds
+  if (-not $NoMonitor) {
+    Write-Info 'Waiting for device to enumerate as a serial port...'
+    $monitorPort = Wait-ForSerialPort -baseline $baselinePorts -preferredPort $null -timeoutSec $MonitorTimeoutSeconds
+    if ($monitorPort) {
+      Start-SerialMonitor -cli $cli -port $monitorPort -baud $Baud
+    } else {
+      Write-Warn 'No new serial port detected after deployment. Connect manually if needed.'
+    }
+  }
   Write-Info 'Done.'
   exit 0
 } catch {
