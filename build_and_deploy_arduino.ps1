@@ -179,6 +179,33 @@ function Start-SerialMonitor([string]$cli, [string]$port, [int]$baud) {
   & $cli monitor -p $port -c "baud=$baud"
 }
 
+function Find-SerialPortViaCli([string]$cli, [string]$fqbn) {
+  try {
+    $out = & $cli board list --format json 2>$null | Out-String
+    if (-not $out) { return $null }
+    $data = $out | ConvertFrom-Json
+    $ports = @()
+    if ($data -and $data.ports) { $ports = $data.ports } elseif ($data) { $ports = $data }
+    foreach ($p in $ports) {
+      if ($p.protocol -ne 'serial') { continue }
+      $addr = $p.address
+      if (-not $addr) { $addr = $p.Address }
+      $boards = $p.boards
+      if (-not $boards) { $boards = $p.Boards }
+      if ($boards) {
+        foreach ($b in $boards) {
+          $bfqbn = $b.fqbn; if (-not $bfqbn) { $bfqbn = $b.FQBN }
+          $bname = $b.name; if (-not $bname) { $bname = $b.Name }
+          if ($bfqbn -eq $fqbn -or ($bname -and ($bname -match 'Pico'))) {
+            if ($addr) { return $addr }
+          }
+        }
+      }
+    }
+  } catch {}
+  return $null
+}
+
 try {
   $cli = Resolve-ArduinoCliPath
   Write-Info "Using arduino-cli: $cli"
@@ -204,6 +231,27 @@ try {
       exit 0
     } catch {
       Write-Warn "Serial upload failed: $($_.Exception.Message). Falling back to UF2 mass-storage copy."
+    }
+  }
+
+  # Auto-detect serial port for Pico W and prefer uploading over serial
+  $autoPort = Find-SerialPortViaCli -cli $cli -fqbn $Fqbn
+  if (-not $autoPort) {
+    $portsNow = Get-SerialPortList
+    if ($portsNow.Count -eq 1) { $autoPort = $portsNow[0] }
+  }
+  if ($autoPort) {
+    Write-Info "Detected Pico serial port: $autoPort (attempting serial upload)"
+    try {
+      Upload-ViaSerial -cli $cli -sketch $sketchPath -fqbn $Fqbn -port $autoPort
+      if (-not $NoMonitor) {
+        $monitorPort = Wait-ForSerialPort -baseline $baselinePorts -preferredPort $autoPort -timeoutSec $MonitorTimeoutSeconds
+        if (-not $monitorPort) { $monitorPort = $autoPort }
+        Start-SerialMonitor -cli $cli -port $monitorPort -baud $Baud
+      }
+      exit 0
+    } catch {
+      Write-Warn "Auto serial upload failed: $($_.Exception.Message). Falling back to UF2 mass-storage copy."
     }
   }
 
