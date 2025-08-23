@@ -2,19 +2,20 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#include <math.h>
 
 // WiFi functionality can be added later by uncommenting:
 // #include <WiFi.h>
 
 // Thermistor constants (powered by VREF)
 #define THERMISTOR_PIN A0
-#define SERIES_RESISTOR 4700
-#define THERMISTOR_NOMINAL 100000
+#define THERMISTOR_SERIES_RESISTOR 4660 // Measured 4.7k
+#define THERMISTOR_NOMINAL 100000 // 100k unmeasured
 #define TEMPERATURE_NOMINAL 25
 #define B_COEFFICIENT 3950
-#define SUPPLY_VOLTAGE 3.3  // VREF is typically 3.3V 
-#define ADC_BIT_DEPTH 10
-#define ADC_MAX_VALUE (1 << ADC_BIT_DEPTH) - 1
+#define VREF 3.27  // Measured VREF voltage (3.3V)
+#define ADC_BIT_DEPTH 12
+#define ADC_MAX_VALUE ((1 << ADC_BIT_DEPTH) - 1)
 
 // Display configuration
 #define SCREEN_WIDTH 128
@@ -23,12 +24,11 @@
 #define SCREEN_ADDRESS1 0x3C
 #define SCREEN_ADDRESS2 0x3D
 
-// PiicoDev Potentiometer module addresses
-#define POT1_ADDRESS 0x35
-#define POT2_ADDRESS 0x36
-
-#define POT_BIT_DEPTH 10
-#define POT_MAX_VALUE (1 << POT_BIT_DEPTH) - 1
+// Analog potentiometer pins
+#define POT1_PIN A1
+#define POT2_PIN A2
+#define POT_BIT_DEPTH 12
+#define POT_MAX_VALUE ((1 << POT_BIT_DEPTH) - 1)
 
 #define MAX_TEMPERATURE 300
 
@@ -76,7 +76,7 @@ uint16_t pot2Value = 0;
 void initializeI2C();
 bool initializeDisplay();
 void initializeHeaters();
-uint16_t readPicoDevPot(uint8_t address);
+uint16_t readAnalogPot(int pin);
 float readTemperature();
 void updateDisplay();
 void scanI2CDevices();
@@ -98,12 +98,10 @@ void setup() {
   
   Serial.println("Raspberry Pi Pico W I2C Project Starting...");
   
-  // Initialize thermistor
-  pinMode(THERMISTOR_PIN, INPUT);
   analogReadResolution(ADC_BIT_DEPTH);
   delay(100); // Wait for ADC to settle
-  int throwaway = analogRead(THERMISTOR_PIN); // Throw away first reading
-
+  (void)analogRead(THERMISTOR_PIN); // Throw away first reading
+ 
   // Initialize I2C with custom pins
   initializeI2C();
   
@@ -122,13 +120,13 @@ void setup() {
   // Initialize heater control pins
   initializeHeaters();
   
-  // Test PiicoDev Potentiometer reading
-  Serial.println("Reading PiicoDev Potentiometers...");
-  pot1Value = readPicoDevPot(POT1_ADDRESS);
-  pot2Value = readPicoDevPot(POT2_ADDRESS);
-  Serial.print("Pot1: ");
+  // Test analog potentiometer reading
+  Serial.println("Reading analog potentiometers...");
+  pot1Value = readAnalogPot(POT1_PIN);
+  pot2Value = readAnalogPot(POT2_PIN);
+  Serial.print("Pot1 (A1): ");
   Serial.print(pot1Value);
-  Serial.print(", Pot2: ");
+  Serial.print(", Pot2 (A2): ");
   Serial.println(pot2Value);
   
   Serial.println("Setup complete!");
@@ -139,13 +137,14 @@ void setup() {
 }
 
 void loop() {
-  // Read PiicoDev potentiometer values
-  pot1Value = readPicoDevPot(POT1_ADDRESS);
-  pot2Value = readPicoDevPot(POT2_ADDRESS);
+  // Read analog potentiometer values
+  pot1Value = readAnalogPot(POT1_PIN);
+  pot2Value = readAnalogPot(POT2_PIN);
 
-  // Map potentiometer values to control ranges
-  targetSpeed = map(pot1Value, 0, POT_MAX_VALUE, 0, MAX_SPEED);
-  targetTemperature = map(pot2Value, 0, POT_MAX_VALUE, 0, MAX_TEMPERATURE);
+  // Map potentiometer values to control ranges with calibration
+  // Option: Add dead zones if pots don't reach full 0-4095 range
+  targetSpeed = map(constrain(pot1Value, 50, POT_MAX_VALUE - 50), 50, POT_MAX_VALUE - 50, 0, MAX_SPEED);
+  targetTemperature = map(constrain(pot2Value, 50, POT_MAX_VALUE - 50), 50, POT_MAX_VALUE - 50, 0, MAX_TEMPERATURE);
 
   currentTemperature = readTemperature();
   
@@ -180,8 +179,6 @@ void loop() {
     Serial.println();
     lastDebug = millis();
   }
-  
-  delay(50); // Reduced delay for better temperature control
 }
 
 void initializeI2C() {
@@ -191,16 +188,7 @@ void initializeI2C() {
   Wire.setSCL(9);
   Wire.begin();
   
-  // Enable internal pull-ups as temporary test (weak, but might work for testing)
-  // pinMode(8, INPUT_PULLUP);  // SDA
-  // pinMode(9, INPUT_PULLUP);  // SCL
-  
-  // Set normal I2C clock now that we're bypassing PiicoDev series resistors
-  //Wire.setClock(100000); // 100kHz - standard I2C speed
-  
   Serial.println("I2C initialized on SDA=GPIO8, SCL=GPIO9");
-  //Serial.println("I2C clock set to 100kHz - bypassing PiicoDev series resistors");
-  //Serial.println("WARNING: Using internal pull-ups - add 4.7k external resistors for reliable operation");
 }
 
 bool initializeDisplay() {
@@ -222,7 +210,7 @@ bool initializeDisplay() {
   // Initialize SSD1306 display
   if(!display.begin(SSD1306_SWITCHCAPVCC, displayAddress)) {
     Serial.println("SSD1306 allocation failed");
-    for(;;); // Don't proceed, loop forever
+    return false; // Return failure instead of hanging
   }
   
   display.clearDisplay();
@@ -238,27 +226,13 @@ bool initializeDisplay() {
   return true;
 }
 
-uint16_t readPicoDevPot(uint8_t address) {
-  // PiicoDev Potentiometer uses simple I2C read - no register commands needed
-  Wire.requestFrom(address, 2);  // Request 2 bytes directly
+uint16_t readAnalogPot(int pin) {
+  // Read analog potentiometer directly
+  uint16_t reading = analogRead(pin);
   
-  if (Wire.available() >= 2) {
-    uint8_t highByte = Wire.read();
-    uint8_t lowByte = Wire.read();
-    
-    // Combine bytes (MSB first)
-    uint16_t result = (highByte << 8) | lowByte;
-    
-    // Mask to ensure we stay within expected range
-    result = result & ((1 << POT_BIT_DEPTH) - 1);
-    
-    return result;
-  } else {
-    Serial.print("No response from PiicoDev Potentiometer at address 0x");
-    Serial.print(address, HEX);
-    Serial.println();
-    return 0;
-  }
+  // The ADC reading is already in the correct range (0 to POT_MAX_VALUE)
+  // No additional processing needed
+  return reading;
 }
 
 void updateDisplay() {
@@ -336,8 +310,6 @@ void scanI2CDevices() {
       // Add known device identification
       if (address == SCREEN_ADDRESS1 || address == SCREEN_ADDRESS2) {
         Serial.print(" (SSD1306 OLED)");
-      } else if (address == POT1_ADDRESS || address == POT2_ADDRESS) {
-        Serial.print(" (PiicoDev Potentiometer)");
       }
       Serial.println();
       deviceCount++;
@@ -360,11 +332,7 @@ void scanI2CDevices() {
     Serial.print("/");
     Serial.print(SCREEN_ADDRESS2, HEX);
     Serial.println(": SSD1306 Display");
-    Serial.print("  - ");
-    Serial.print(POT1_ADDRESS, HEX);
-    Serial.print("/");
-    Serial.print(POT2_ADDRESS, HEX);
-    Serial.println(": PiicoDev Potentiometer");  
+    Serial.println("  - A1/A2: Analog potentiometers");  
   } else {
     Serial.print("Found ");
     Serial.print(deviceCount);
@@ -372,25 +340,12 @@ void scanI2CDevices() {
   }
 }
 
-// Replace your readTemperature() function with this:
 float readTemperature() {
-  // Software oversampling for higher precision
-  // Take multiple 10-bit readings and average them
-  const int numSamples = 16; // 16 samples gives us ~2 extra bits of precision
-  long sum = 0;
+  int raw = analogRead(THERMISTOR_PIN);
   
-  for (int i = 0; i < numSamples; i++) {
-    sum += analogRead(THERMISTOR_PIN);
-  }
-  
-  float averageRaw = sum / (float)numSamples;
-  
-  float voltage = averageRaw * (SUPPLY_VOLTAGE / ADC_MAX_VALUE);
-
-  // Pull-up configuration: 4.7k resistor from VREF to A0, thermistor from A0 to GND
-  // Voltage divider: V_A0 = VREF × (R_thermistor / (R_series + R_thermistor))
-  // Solving for R_thermistor: R_thermistor = R_series × voltage / (VREF - voltage)
-  float resistance = SERIES_RESISTOR * voltage / (SUPPLY_VOLTAGE - voltage);
+  // Calculate resistance using measured VREF and series resistor values
+  float voltage = raw * (VREF / (float)ADC_MAX_VALUE);
+  float resistance = THERMISTOR_SERIES_RESISTOR * voltage / (VREF - voltage);
   
   // Steinhart-Hart equation
   float steinhart = resistance / THERMISTOR_NOMINAL;
@@ -410,9 +365,9 @@ void initializeHeaters() {
   pinMode(HEATER_3_PIN, OUTPUT);
   pinMode(HEATER_4_PIN, OUTPUT);
   
-  // Configure GPIO28 as 3.3V output (limited current)
+  // Configure GPIO28 as VREF output (limited current)
   pinMode(28, OUTPUT);
-  digitalWrite(28, HIGH);  // Set GPIO28 to 3.3V
+  digitalWrite(28, HIGH);  // Set GPIO28 to VREF
   
   // Initialize all heaters to OFF
   digitalWrite(HEATER_1_PIN, LOW);
@@ -422,8 +377,8 @@ void initializeHeaters() {
   
   Serial.println("Heater control pins initialized (GPIO18-21)");
   Serial.println("All heaters initialized to OFF state");
-  Serial.println("GPIO28 set to HIGH (3.3V) - for I2C pull-up resistors");
-  Serial.println("Use VREF (Pin 35) for thermistor power, 3.3V (Pin 36) for I2C devices");
+  Serial.println("GPIO28 set to HIGH (VREF) - for I2C pull-up resistors");
+  Serial.println("Use VREF (Pin 35) for thermistor power, VREF (Pin 36) for I2C devices");
 }
 
 void updateTemperatureControl() {
@@ -460,7 +415,7 @@ float calculateHeaterPower(float targetTemp, float currentTemp) {
   if (power > 1.0) power = 1.0;
   
   // Dead zone around target temperature
-  if (abs(error) < TEMP_TOLERANCE) {
+  if (fabs(error) < TEMP_TOLERANCE) {
     power *= 0.1; // Reduce power when close to target
   }
   
