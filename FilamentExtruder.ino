@@ -18,11 +18,11 @@
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
 #define OLED_RESET -1
-#define SCREEN_ADDRESS 0x3C // Back to 0x3D - 0x3C showed I2C error
+#define SCREEN_ADDRESS 0x3C
 
 // PiicoDev Potentiometer module addresses
-#define POT1_ADDRESS 0x10  // Default PiicoDev Potentiometer address
-#define POT2_ADDRESS 0x11  // Second potentiometer (address modified via jumper)
+#define POT1_ADDRESS 0x35
+#define POT2_ADDRESS 0x36
 
 // PiicoDev Potentiometer value range (10-bit: 0-1023)
 #define POT_MAX_VALUE 1023
