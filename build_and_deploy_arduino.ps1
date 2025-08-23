@@ -19,6 +19,41 @@ function Write-Info([string]$msg) { Write-Host "[INFO] $msg" -ForegroundColor Cy
 function Write-Warn([string]$msg) { Write-Host "[WARN] $msg" -ForegroundColor Yellow }
 function Write-Err([string]$msg)  { Write-Host "[ERROR] $msg" -ForegroundColor Red }
 
+# State file to remember last successful serial port (inside build output dir)
+$StateFilePath = Join-Path $OutputDir '.arduino_deploy_state.json'
+
+function Load-LastPort {
+  try {
+    if (Test-Path $StateFilePath) {
+      $raw = Get-Content -LiteralPath $StateFilePath -Raw -ErrorAction Stop
+      if ($raw) {
+        $obj = $raw | ConvertFrom-Json
+        $p = $obj.LastPort
+        if ($p) { return [string]$p }
+      }
+    }
+  } catch {}
+  return $null
+}
+
+function Save-LastPort([string]$port) {
+  if (-not $port) { return }
+  try {
+    # Ensure state directory exists
+    $stateDir = Split-Path -Parent $StateFilePath
+    if ($stateDir -and -not (Test-Path $stateDir)) { New-Item -ItemType Directory -Force -Path $stateDir | Out-Null }
+    $obj = [PSCustomObject]@{
+      LastPort = $port
+      SavedAt  = (Get-Date).ToString('s')
+    }
+    $json = $obj | ConvertTo-Json -Depth 3
+    Set-Content -LiteralPath $StateFilePath -Value $json -Encoding UTF8 -Force
+    Write-Info "Saved last serial port: $port"
+  } catch {
+    Write-Warn "Failed to save last port state: $($_.Exception.Message)"
+  }
+}
+
 function Resolve-ArduinoCliPath {
   if ($CliPath) {
     if (Test-Path $CliPath) { return (Resolve-Path $CliPath).Path }
@@ -209,13 +244,18 @@ function Find-SerialPortViaCli([string]$cli, [string]$fqbn) {
   return $null
 }
 
-function Get-CandidateSerialPorts([string]$cli, [string]$fqbn) {
-  $candidates = @()
+function Get-CandidateSerialPorts([string]$cli, [string]$fqbn, [string]$lastPort) {
+  $ordered = @()
+  $append = {
+    param([string]$p)
+    if ($p -and -not ($ordered -contains $p)) { $script:ordered += $p }
+  }
+  & $append $lastPort
   $cliPort = Find-SerialPortViaCli -cli $cli -fqbn $fqbn
-  if ($cliPort) { $candidates += $cliPort }
+  & $append $cliPort
   $localPorts = Get-SerialPortList
-  if ($localPorts) { $candidates += $localPorts }
-  return ($candidates | Where-Object { $_ } | Sort-Object -Unique)
+  foreach ($lp in $localPorts) { & $append $lp }
+  return $ordered
 }
 
 try {
@@ -231,6 +271,7 @@ try {
   if ($BuildOnly) { Write-Info 'BuildOnly specified. Skipping deploy.'; exit 0 }
 
   $baselinePorts = Get-SerialPortList
+  $lastSavedPort = Load-LastPort
 
   if ($Port) {
     try {
@@ -249,11 +290,12 @@ try {
   # Probe available serial ports first (before UF2)
   $probeDeadline = (Get-Date).AddSeconds([Math]::Max(1, $SerialProbeSeconds))
   do {
-    $candidates = Get-CandidateSerialPorts -cli $cli -fqbn $Fqbn
+    $candidates = Get-CandidateSerialPorts -cli $cli -fqbn $Fqbn -lastPort $lastSavedPort
     foreach ($cand in $candidates) {
       Write-Info "Trying serial upload on $cand"
       try {
         Upload-ViaSerial -cli $cli -sketch $sketchPath -fqbn $Fqbn -port $cand
+        Save-LastPort -port $cand
         if (-not $NoMonitor) {
           $monitorPort = Wait-ForSerialPort -baseline $baselinePorts -preferredPort $cand -timeoutSec $MonitorTimeoutSeconds
           if (-not $monitorPort) { $monitorPort = $cand }
@@ -272,6 +314,7 @@ try {
     Write-Info 'Waiting for device to enumerate as a serial port...'
     $monitorPort = Wait-ForSerialPort -baseline $baselinePorts -preferredPort $null -timeoutSec $MonitorTimeoutSeconds
     if ($monitorPort) {
+      Save-LastPort -port $monitorPort
       Start-SerialMonitor -cli $cli -port $monitorPort -baud $Baud
     } else {
       Write-Warn 'No new serial port detected after deployment. Connect manually if needed.'
