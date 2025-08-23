@@ -25,7 +25,7 @@
 #define POT1_ADDRESS 0x35
 #define POT2_ADDRESS 0x36
 
-#define POT_BIT_DEPTH 12
+#define POT_BIT_DEPTH 10
 #define POT_MAX_VALUE (1 << POT_BIT_DEPTH) - 1
 
 #define MAX_TEMPERATURE 300
@@ -370,14 +370,27 @@ void scanI2CDevices() {
   }
 }
 
+// Replace your readTemperature() function with this:
 float readTemperature() {
-  int raw = analogRead(THERMISTOR_PIN);
+  // Software oversampling for higher precision
+  // Take multiple 10-bit readings and average them
+  const int numSamples = 16; // 16 samples gives us ~2 extra bits of precision
+  long sum = 0;
   
-  // Calculate resistance using 3.3V reference
-  float voltage = raw * (SUPPLY_VOLTAGE / POT_MAX_VALUE);
+  for (int i = 0; i < numSamples; i++) {
+    sum += analogRead(THERMISTOR_PIN);
+  }
+  
+  float averageRaw = sum / (float)numSamples;
+  
+  float voltage = averageRaw * (SUPPLY_VOLTAGE / POT_MAX_VALUE);
+
+  // Pull-up configuration: 4.7k resistor from VREF to A0, thermistor from A0 to GND
+  // Voltage divider: V_A0 = VREF × (R_thermistor / (R_series + R_thermistor))
+  // Solving for R_thermistor: R_thermistor = R_series × voltage / (VREF - voltage)
   float resistance = SERIES_RESISTOR * voltage / (SUPPLY_VOLTAGE - voltage);
   
-  // Steinhart-Hart equation (same as before)
+  // Steinhart-Hart equation
   float steinhart = resistance / THERMISTOR_NOMINAL;
   steinhart = log(steinhart);
   steinhart /= B_COEFFICIENT;
