@@ -5,7 +5,7 @@ Param(
   [int]$MonitorTimeoutSeconds = 60,
   [int]$Baud = 115200,
   [switch]$NoMonitor,
-  [int]$SerialProbeSeconds = 3,
+  [int]$SerialProbeSeconds = 10,
   [string]$CliPath,
   [string]$Fqbn = 'rp2040:rp2040:rpipicow:usbstack=picosdk',
   [string]$OutputDir = '.\\build',
@@ -220,23 +220,45 @@ function Start-SerialMonitor([string]$cli, [string]$port, [int]$baud) {
 function Find-SerialPortViaCli([string]$cli, [string]$fqbn) {
   try {
     $out = & $cli board list --format json 2>$null | Out-String
+    Write-Info 'arduino-cli board list --format json output:'
+    if ($out) { Write-Host $out } else { Write-Host '[empty]' }
     if (-not $out) { return $null }
     $data = $out | ConvertFrom-Json
-    $ports = @()
-    if ($data -and $data.ports) { $ports = $data.ports } elseif ($data) { $ports = $data }
-    foreach ($p in $ports) {
-      if ($p.protocol -ne 'serial') { continue }
-      $addr = $p.address
-      if (-not $addr) { $addr = $p.Address }
-      $boards = $p.boards
-      if (-not $boards) { $boards = $p.Boards }
-      if ($boards) {
-        foreach ($b in $boards) {
-          $bfqbn = $b.fqbn; if (-not $bfqbn) { $bfqbn = $b.FQBN }
-          $bname = $b.name; if (-not $bname) { $bname = $b.Name }
-          if ($bfqbn -eq $fqbn -or ($bname -and ($bname -match 'Pico'))) {
-            if ($addr) { return $addr }
+    $preferred = @()
+    $others = @()
+    # Newer CLI structure: detected_ports: [{ port: {address, protocol...}, matching_boards: [...] }]
+    if ($data -and $data.detected_ports) {
+      foreach ($entry in $data.detected_ports) {
+        $portObj = $entry.port
+        if (-not $portObj) { continue }
+        $proto = $portObj.protocol
+        if ($proto -ne 'serial') { continue }
+        $addr = $portObj.address
+        $boards = $entry.matching_boards
+        $isPreferred = $false
+        if ($boards) {
+          foreach ($b in $boards) {
+            $bfqbn = $b.fqbn; if (-not $bfqbn) { $bfqbn = $b.FQBN }
+            $bname = $b.name; if (-not $bname) { $bname = $b.Name }
+            if ($bfqbn -eq $fqbn -or ($bname -and ($bname -match 'Pico'))) { $isPreferred = $true; break }
           }
+        }
+        if ($addr) {
+          if ($isPreferred) { $preferred += $addr } else { $others += $addr }
+        }
+      }
+      if ($preferred.Count -gt 0) { return $preferred[0] }
+      if ($others.Count -gt 0) { return $others[0] }
+    }
+    # Fallback: parse plain text output if JSON structure is unexpected
+    $text = & $cli board list 2>$null | Out-String
+    Write-Info 'arduino-cli board list (text) output:'
+    if ($text) { Write-Host $text } else { Write-Host '[empty]' }
+    if ($text) {
+      $lines = $text -split "\r?\n"
+      foreach ($line in $lines) {
+        if ($line -match '(COM\d+)') {
+          return $Matches[1]
         }
       }
     }
@@ -248,13 +270,13 @@ function Get-CandidateSerialPorts([string]$cli, [string]$fqbn, [string]$lastPort
   $ordered = @()
   $append = {
     param([string]$p)
-    if ($p -and -not ($ordered -contains $p)) { $script:ordered += $p }
+    if ($p -and -not ($ordered -contains $p)) { $ordered += $p }
   }
   & $append $lastPort
   $cliPort = Find-SerialPortViaCli -cli $cli -fqbn $fqbn
   & $append $cliPort
   $localPorts = Get-SerialPortList
-  foreach ($lp in $localPorts) { & $append $lp }
+  if ($localPorts) { foreach ($lp in $localPorts) { & $append $lp } }
   return $ordered
 }
 
@@ -287,10 +309,32 @@ try {
     }
   }
 
+  # Try the last known-good port immediately (if provided and not overridden)
+  if (-not $Port -and $lastSavedPort) {
+    Write-Info "Trying last saved serial port first: $lastSavedPort"
+    try {
+      Upload-ViaSerial -cli $cli -sketch $sketchPath -fqbn $Fqbn -port $lastSavedPort
+      Save-LastPort -port $lastSavedPort
+      if (-not $NoMonitor) {
+        $monitorPort = Wait-ForSerialPort -baseline $baselinePorts -preferredPort $lastSavedPort -timeoutSec $MonitorTimeoutSeconds
+        if (-not $monitorPort) { $monitorPort = $lastSavedPort }
+        Start-SerialMonitor -cli $cli -port $monitorPort -baud $Baud
+      }
+      exit 0
+    } catch {
+      Write-Warn "Upload on last saved port $lastSavedPort failed: $($_.Exception.Message)"
+    }
+  }
+
   # Probe available serial ports first (before UF2)
   $probeDeadline = (Get-Date).AddSeconds([Math]::Max(1, $SerialProbeSeconds))
   do {
     $candidates = Get-CandidateSerialPorts -cli $cli -fqbn $Fqbn -lastPort $lastSavedPort
+    if (-not $candidates -or $candidates.Count -eq 0) {
+      Write-Warn 'No serial candidates found yet; continuing to probe briefly...'
+    } else {
+      Write-Info ("Serial candidates: " + ($candidates -join ', '))
+    }
     foreach ($cand in $candidates) {
       Write-Info "Trying serial upload on $cand"
       try {
@@ -308,6 +352,8 @@ try {
     }
     Start-Sleep -Milliseconds 300
   } while ((Get-Date) -lt $probeDeadline)
+
+  Write-Warn 'Serial upload attempts exhausted; falling back to UF2 mass-storage copy.'
 
   Upload-ViaMassStorage -uf2 $uf2 -timeoutSec $TimeoutSeconds
   if (-not $NoMonitor) {
