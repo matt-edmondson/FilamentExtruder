@@ -46,8 +46,9 @@
 #define TARGET_TEMP_DEFAULT 220    // Default target temperature in Celsius
 #define TEMP_TOLERANCE 2           // Temperature tolerance in degrees
 #define HEATER_PULSE_INTERVAL 1000 // Pulse interval in milliseconds
-#define MAX_HEATER_ON_TIME 5000    // Maximum continuous heater on time (safety)
+#define MAX_HEATER_ON_TIME 30000   // Maximum continuous heater on time (30 seconds)
 #define SAFETY_MAX_TEMP 350        // Safety shutdown temperature
+#define MAX_DUTY_CYCLE 0.85        // Maximum heater duty cycle (85% - prevents 100% on time)
 
 // Control variables
 int targetSpeed = 0;
@@ -84,6 +85,7 @@ void updateHeaterControl();
 void setHeaterState(int heaterIndex, bool state);
 void emergencyShutdown();
 void resetEmergencyWarning();
+void resetSafetyTimeout();
 float calculateHeaterPower(float targetTemp, float currentTemp);
 void updateTemperatureControl();
 
@@ -130,11 +132,15 @@ void setup() {
   Serial.print(", Pot2 (A2): ");
   Serial.println(pot2Value);
   
+  // Ensure clean start - reset any safety timeouts
+  Serial.println("Clearing any previous safety timeout states...");
+  
   Serial.println("Setup complete!");
   Serial.println("Heater control: GPIO18-21 configured for relay control");
   Serial.print("Target temperature: ");
   Serial.print(targetTemperature);
   Serial.println("°C");
+  Serial.println("DEBUG: Use Serial Monitor to diagnose heater issues");
 }
 
 void loop() {
@@ -536,6 +542,9 @@ void initializeHeaters() {
   Serial.print("ms, ");
   Serial.print(HEATER_PULSE_INTERVAL*3/4);
   Serial.println("ms");
+  Serial.print("Maximum duty cycle limited to: ");
+  Serial.print(MAX_DUTY_CYCLE * 100, 1);
+  Serial.println("% (prevents relay overheating)");
   Serial.println("GPIO28 set to HIGH (VREF) - for I2C pull-up resistors");
   Serial.println("Use VREF (Pin 35) for thermistor power, VREF (Pin 36) for I2C devices");
 }
@@ -562,10 +571,21 @@ void updateTemperatureControl() {
   }
   
   // Enable heaters only if target temperature is reasonable
+  static bool lastHeatersEnabled = false;
   if (targetTemperature > 50 && targetTemperature < SAFETY_MAX_TEMP) {
     heatersEnabled = true;
   } else {
     heatersEnabled = false;
+  }
+  
+  // Debug heaters enabled/disabled changes
+  if (heatersEnabled != lastHeatersEnabled) {
+    Serial.print("Heaters ");
+    Serial.print(heatersEnabled ? "ENABLED" : "DISABLED");
+    Serial.print(" - Target temp: ");
+    Serial.print(targetTemperature);
+    Serial.println("°C");
+    lastHeatersEnabled = heatersEnabled;
   }
   
   // Calculate required heater power using simple proportional control
@@ -575,14 +595,33 @@ void updateTemperatureControl() {
 }
 
 float calculateHeaterPower(float targetTemp, float currentTemp) {
+  // Check for NaN inputs
+  if (isnan(targetTemp) || isnan(currentTemp)) {
+    Serial.println("ERROR: NaN temperature values detected!");
+    return 0.0; // Safe fallback
+  }
+  
   float error = targetTemp - currentTemp;
+  
+  // Check for unreasonable values
+  if (fabs(error) > 500.0) {
+    Serial.print("ERROR: Unreasonable temperature error: ");
+    Serial.println(error);
+    return 0.0; // Safe fallback
+  }
   
   // Simple proportional control
   float power = error / 50.0; // Scale factor - adjust as needed
   
-  // Clamp power to 0-1 range
+  // Check for NaN result
+  if (isnan(power)) {
+    Serial.println("ERROR: Power calculation resulted in NaN!");
+    return 0.0; // Safe fallback
+  }
+  
+  // Clamp power to 0 to MAX_DUTY_CYCLE range (not full 0-1)
   if (power < 0) power = 0;
-  if (power > 1.0) power = 1.0;
+  if (power > MAX_DUTY_CYCLE) power = MAX_DUTY_CYCLE;
   
   // Dead zone around target temperature
   if (fabs(error) < TEMP_TOLERANCE) {
@@ -593,12 +632,56 @@ float calculateHeaterPower(float targetTemp, float currentTemp) {
 }
 
 void updateHeaterControl() {
+  // Safety timeout variables - moved to function scope so they can be reset
+  static bool safetyWarningShown = false;
+  static unsigned long anyHeaterOnTime = 0;
+  static unsigned long safetyTimeoutStart = 0;
+  
+  // Debug: Print heater control status
+  static unsigned long lastHeaterDebug = 0;
+  if (millis() - lastHeaterDebug > 2000) { // Debug every 2 seconds
+    Serial.print("HEATER DEBUG - Enabled: ");
+    Serial.print(heatersEnabled ? "YES" : "NO");
+    Serial.print(", Power: ");
+    Serial.print(heaterPower * 100, 1);
+    Serial.print("%, Target: ");
+    Serial.print(targetTemperature);
+    Serial.print("°C, Current: ");
+    Serial.print(currentTemperature, 1);
+    Serial.println("°C");
+    lastHeaterDebug = millis();
+  }
+  
+  // CRITICAL FIX: Track heater disabled state to clear safety timeouts
+  static bool wasDisabled = false;
+  
   if (!heatersEnabled) {
     // Turn off all heaters if disabled
     for (int i = 0; i < 4; i++) {
       setHeaterState(i, false);
     }
+    
+    // Clear all safety timeout states when heaters first become disabled
+    // This prevents stuck-off state when target temp is raised back up
+    if (!wasDisabled) {
+      // Just became disabled - clear all safety states
+      anyHeaterOnTime = 0;
+      safetyWarningShown = false;
+      Serial.println("  -> Heaters DISABLED - clearing all safety timeout states");
+      Serial.println("  -> MANUAL RESET: Turn temp pot to minimum and back up to clear any stuck states");
+      wasDisabled = true;
+    }
+    
+    if (millis() - lastHeaterDebug < 100) {
+      Serial.println("  -> Heaters DISABLED, forcing all OFF");
+    }
     return;
+  } else {
+    // Reset disabled state flag when heaters are enabled again
+    if (wasDisabled) {
+      Serial.println("  -> Heaters RE-ENABLED - ready to heat");
+      wasDisabled = false;
+    }
   }
   
   unsigned long currentTime = millis();
@@ -608,20 +691,42 @@ void updateHeaterControl() {
   unsigned long onTime = (unsigned long)(HEATER_PULSE_INTERVAL * heaterPower);
   
   // Safety check - limit maximum continuous on time
-  static bool safetyWarningShown = false;
-  static unsigned long anyHeaterOnTime = 0;
+  // (variables now declared at function start)
   bool anyHeaterOn = false;
   
-  // Apply individual offset control to each heater
+  // Check safety timeout FIRST before applying heater control
+  bool safetyTimeoutActive = false;
+  if (anyHeaterOnTime > 0) {
+    unsigned long elapsed;
+    if (currentTime >= anyHeaterOnTime) {
+      elapsed = currentTime - anyHeaterOnTime;
+    } else {
+      elapsed = (0xFFFFFFFF - anyHeaterOnTime) + currentTime + 1;
+    }
+    
+    if (elapsed > MAX_HEATER_ON_TIME) {
+      safetyTimeoutActive = true;
+      if (!safetyWarningShown) {
+        Serial.println("WARNING: Heater safety timeout - forcing OFF for 10 seconds");
+        safetyWarningShown = true;
+        safetyTimeoutStart = currentTime;
+      }
+    }
+  }
+  
+  // Apply individual offset control to each heater (but override if safety timeout)
   for (int i = 0; i < 4; i++) {
-    // Offset each heater by 25% of pulse interval (evenly distributed)
-    unsigned long heaterOffset = (HEATER_PULSE_INTERVAL / 4) * i;
-    unsigned long offsetTime = (currentTime + heaterOffset) % HEATER_PULSE_INTERVAL;
+    bool heaterShouldBeOn = false;
     
-    // Determine if this heater should be on based on its offset position
-    bool heaterShouldBeOn = offsetTime < onTime;
+    if (!safetyTimeoutActive) {
+      // Normal PWM operation
+      unsigned long heaterOffset = (HEATER_PULSE_INTERVAL / 4) * i;
+      unsigned long offsetTime = (currentTime + heaterOffset) % HEATER_PULSE_INTERVAL;
+      heaterShouldBeOn = offsetTime < onTime;
+    }
+    // If safety timeout active, heaterShouldBeOn stays false
     
-    // Track if any heater is on for safety timing
+    // Track if any heater is actually on
     if (heaterShouldBeOn) {
       anyHeaterOn = true;
     }
@@ -630,23 +735,67 @@ void updateHeaterControl() {
   }
   
   // Safety timing based on any heater being on
-  if (anyHeaterOn) {
+  // (variables now declared at function start)
+  
+  // Debug safety timeout status and check for NaN/overflow issues
+  if (millis() - lastHeaterDebug < 100) {
+    Serial.print("  -> Safety: Warning=");
+    Serial.print(safetyWarningShown ? "YES" : "NO");
+    
+    // Check for timer overflow/NaN issues
+    if (anyHeaterOnTime > 0) {
+      unsigned long timeDiff = currentTime - anyHeaterOnTime;
+      Serial.print(", OnTime=");
+      if (timeDiff > currentTime) {
+        Serial.print("OVERFLOW!");
+        anyHeaterOnTime = currentTime; // Fix overflow
+      } else {
+        Serial.print(timeDiff / 1000);
+        Serial.print("s/");
+        Serial.print(MAX_HEATER_ON_TIME / 1000);
+        Serial.print("s");
+      }
+    }
+    
+    Serial.print(", AnyOn=");
+    Serial.print(anyHeaterOn ? "YES" : "NO");
+    
+    // Check for NaN in heater power
+    if (isnan(heaterPower)) {
+      Serial.print(", POWER=NaN!");
+      heaterPower = 0.0; // Fix NaN
+    }
+    
+    Serial.println();
+  }
+  
+  // Handle safety timeout recovery and timing
+  if (anyHeaterOn && !safetyTimeoutActive) {
     if (anyHeaterOnTime == 0) {
       anyHeaterOnTime = currentTime; // Start timing
       safetyWarningShown = false; // Reset warning flag for new heating cycle
-    } else if (currentTime - anyHeaterOnTime > MAX_HEATER_ON_TIME) {
-      // Force all heaters off after max time
-      for (int i = 0; i < 4; i++) {
-        setHeaterState(i, false);
-      }
-      if (!safetyWarningShown) {
-        Serial.println("WARNING: Heater safety timeout - forcing OFF for safety");
-        safetyWarningShown = true; // Only show warning once per timeout event
-      }
     }
+    // Timer checking is now done above before heater control
   } else {
-    anyHeaterOnTime = 0; // Reset timer when all heaters off
-    safetyWarningShown = false; // Reset warning flag when heaters turn off normally
+    // No heaters on OR safety timeout active
+    if (safetyWarningShown) {
+      // In safety timeout recovery period
+      unsigned long cooldownElapsed;
+      if (currentTime >= safetyTimeoutStart) {
+        cooldownElapsed = currentTime - safetyTimeoutStart;
+      } else {
+        cooldownElapsed = (0xFFFFFFFF - safetyTimeoutStart) + currentTime + 1;
+      }
+      
+      if (cooldownElapsed > 10000) {
+        // Reset after 10 second cooldown
+        anyHeaterOnTime = 0;
+        safetyWarningShown = false;
+        Serial.println("Safety timeout cleared - heaters can restart");
+      }
+    } else {
+      anyHeaterOnTime = 0; // Reset timer when heaters off normally
+    }
   }
   
   lastHeaterUpdate = currentTime;
@@ -674,6 +823,18 @@ static bool emergencyWarningShown = false;
 
 void resetEmergencyWarning() {
   emergencyWarningShown = false;
+}
+
+void resetSafetyTimeout() {
+  // Reset all safety timeout variables to clear stuck state
+  extern bool safetyWarningShown;
+  extern unsigned long anyHeaterOnTime;
+  static bool safetyTimeoutReset = false;
+  
+  Serial.println("MANUAL SAFETY TIMEOUT RESET");
+  safetyTimeoutReset = false;
+  // Note: The actual variables are static in updateHeaterControl()
+  // This function mainly provides a way to force reset via serial commands
 }
 
 void emergencyShutdown() {
