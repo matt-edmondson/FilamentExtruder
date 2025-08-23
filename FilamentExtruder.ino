@@ -88,6 +88,10 @@ void setup() {
   
   Serial.println("Raspberry Pi Pico W I2C Project Starting...");
   
+  // Initialize thermistor
+  pinMode(THERMISTOR_PIN, INPUT);
+  analogReadResolution(12);
+
   // Initialize I2C with custom pins
   initializeI2C();
   
