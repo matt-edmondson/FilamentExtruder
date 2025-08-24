@@ -6,7 +6,9 @@ Param(
   [int]$Baud = 115200,
   [switch]$NoMonitor,
   [string]$CliPath,
-  [string]$Fqbn = 'rp2040:rp2040:rpipicow:usbstack=picosdk',
+  [string]$Fqbn,
+  [ValidateSet('PicoW', 'Uno', 'Custom')]
+  [string]$Board = 'PicoW',
   [string]$OutputDir = '.\\build',
   [string]$Sketch
 )
@@ -69,21 +71,70 @@ function Get-ArduinoCliPath {
     return $localCli
 }
 
-function Install-RequiredComponents([string]$CliPath) {
+function Get-BoardConfiguration([string]$Board, [string]$CustomFqbn) {
     <# .SYNOPSIS
-       Installs the RP2040 core and required libraries
+       Returns board configuration based on the selected board type
     #>
-    $packageUrl = 'https://github.com/earlephilhower/arduino-pico/releases/download/global/package_rp2040_index.json'
-    
+    switch ($Board) {
+        'PicoW' {
+            return @{
+                Fqbn = 'rp2040:rp2040:rpipicow:usbstack=picosdk'
+                PackageUrl = 'https://github.com/earlephilhower/arduino-pico/releases/download/global/package_rp2040_index.json'
+                Core = 'rp2040:rp2040'
+                PreferredSketch = 'FilamentExtruder.ino'
+                Description = 'Raspberry Pi Pico W'
+            }
+        }
+        'Uno' {
+            return @{
+                Fqbn = 'arduino:avr:uno'
+                PackageUrl = $null  # Arduino AVR core is built-in
+                Core = 'arduino:avr'
+                PreferredSketch = 'FilamentExtruder_Uno.ino'
+                Description = 'Arduino Uno R3'
+            }
+        }
+        'Custom' {
+            if (-not $CustomFqbn) {
+                throw 'Custom FQBN must be provided when using Custom board type'
+            }
+            return @{
+                Fqbn = $CustomFqbn
+                PackageUrl = $null
+                Core = $null
+                PreferredSketch = 'FilamentExtruder.ino'
+                Description = "Custom Board ($CustomFqbn)"
+            }
+        }
+        default {
+            throw "Unknown board type: $Board"
+        }
+    }
+}
+
+function Install-RequiredComponents([string]$CliPath, [hashtable]$BoardConfig) {
+    <# .SYNOPSIS
+       Installs the required board core and libraries based on board configuration
+    #>
     Write-Info 'Initializing Arduino CLI configuration'
     & $CliPath config init | Out-Null
-    & $CliPath config set board_manager.additional_urls $packageUrl | Out-Null
+    
+    # Add package URL if specified (for non-standard boards)
+    if ($BoardConfig.PackageUrl) {
+        Write-Info "Adding board package URL: $($BoardConfig.PackageUrl)"
+        & $CliPath config set board_manager.additional_urls $BoardConfig.PackageUrl | Out-Null
+    }
     
     Write-Info 'Updating core index'
     & $CliPath core update-index | Out-Null
     
-    Write-Info 'Installing RP2040 core'
-    & $CliPath core install rp2040:rp2040 | Out-Null
+    # Install board core if specified
+    if ($BoardConfig.Core) {
+        Write-Info "Installing $($BoardConfig.Description) core: $($BoardConfig.Core)"
+        & $CliPath core install $BoardConfig.Core | Out-Null
+    } else {
+        Write-Info "Using built-in or pre-installed core for $($BoardConfig.Description)"
+    }
 
     $requiredLibraries = @(
         'Adafruit SSD1306',
@@ -101,9 +152,9 @@ function Install-RequiredComponents([string]$CliPath) {
 
 #region Sketch Management
 
-function Get-SketchPath {
+function Get-SketchPath([hashtable]$BoardConfig) {
     <# .SYNOPSIS
-       Finds the Arduino sketch file (.ino) to compile
+       Finds the Arduino sketch file (.ino) to compile based on board configuration
     #>
     if ($Sketch) {
         if (Test-Path $Sketch) { 
@@ -132,15 +183,30 @@ function Get-SketchPath {
         $validSketches = $allSketches 
     }
 
-    # Prefer FilamentExtruder.ino if it exists
-    $preferredSketch = $validSketches | Where-Object { 
+    # First, prefer the board-specific sketch if it exists
+    if ($BoardConfig.PreferredSketch) {
+        $boardPreferredSketch = $validSketches | Where-Object { 
+            $_.Name -ieq $BoardConfig.PreferredSketch 
+        } | Sort-Object { 
+            $_.DirectoryName -eq $PSScriptRoot 
+        } -Descending | Select-Object -First 1
+        
+        if ($boardPreferredSketch) { 
+            Write-Info "Using board-specific sketch: $($boardPreferredSketch.Name)"
+            return $boardPreferredSketch.FullName 
+        }
+    }
+
+    # Fallback: Prefer FilamentExtruder.ino if it exists
+    $fallbackSketch = $validSketches | Where-Object { 
         $_.Name -ieq 'FilamentExtruder.ino' 
     } | Sort-Object { 
         $_.DirectoryName -eq $PSScriptRoot 
     } -Descending | Select-Object -First 1
     
-    if ($preferredSketch) { 
-        return $preferredSketch.FullName 
+    if ($fallbackSketch) { 
+        Write-Warn "Board-specific sketch not found, using fallback: $($fallbackSketch.Name)"
+        return $fallbackSketch.FullName 
     }
 
     # Prefer root-level sketches
@@ -186,18 +252,33 @@ function Invoke-SketchCompilation([string]$CliPath, [string]$SketchPath, [string
     }
 }
 
-function Get-CompiledFirmware([string]$OutputDirectory) {
+function Get-CompiledFirmware([string]$OutputDirectory, [hashtable]$BoardConfig) {
     <# .SYNOPSIS
-       Finds the compiled UF2 firmware file
+       Finds the compiled firmware file based on board type
     #>
-    $firmwareFile = Get-ChildItem -Path $OutputDirectory -Filter '*.uf2' -File -Recurse | 
-                   Sort-Object LastWriteTime -Descending | 
-                   Select-Object -First 1
-    
-    if (-not $firmwareFile) { 
-        throw "No UF2 firmware found in '$OutputDirectory'" 
+    # Different boards produce different firmware file types
+    $firmwareExtensions = @()
+    if ($BoardConfig.Fqbn -like '*rp2040*') {
+        $firmwareExtensions = @('*.uf2')
+    } elseif ($BoardConfig.Fqbn -like '*arduino:avr*') {
+        $firmwareExtensions = @('*.hex')
+    } else {
+        # Default: try common firmware extensions
+        $firmwareExtensions = @('*.uf2', '*.hex', '*.bin')
     }
-    return $firmwareFile.FullName
+    
+    foreach ($extension in $firmwareExtensions) {
+        $firmwareFile = Get-ChildItem -Path $OutputDirectory -Filter $extension -File -Recurse | 
+                       Sort-Object LastWriteTime -Descending | 
+                       Select-Object -First 1
+        
+        if ($firmwareFile) {
+            Write-Info "Found firmware file: $($firmwareFile.Name)"
+            return $firmwareFile.FullName
+        }
+    }
+    
+    throw "No firmware file found in '$OutputDirectory' with extensions: $($firmwareExtensions -join ', ')"
 }
 
 #endregion
@@ -456,17 +537,22 @@ function Start-SerialMonitor([string]$CliPath, [string]$Port, [int]$BaudRate) {
 #region Main Script Logic
 
 try {
+    # Get board configuration
+    $boardConfig = Get-BoardConfiguration -Board $Board -CustomFqbn $Fqbn
+    Write-Info "Target board: $($boardConfig.Description)"
+    Write-Info "Board FQBN: $($boardConfig.Fqbn)"
+    
     # Initialize Arduino CLI
     $arduinoCliPath = Get-ArduinoCliPath
     Write-Info "Using arduino-cli: $arduinoCliPath"
     
-    Install-RequiredComponents -CliPath $arduinoCliPath
+    Install-RequiredComponents -CliPath $arduinoCliPath -BoardConfig $boardConfig
 
     # Build firmware
-    $sketchPath = Get-SketchPath
-    Invoke-SketchCompilation -CliPath $arduinoCliPath -SketchPath $sketchPath -BoardFqbn $Fqbn -OutputDirectory $OutputDir
+    $sketchPath = Get-SketchPath -BoardConfig $boardConfig
+    Invoke-SketchCompilation -CliPath $arduinoCliPath -SketchPath $sketchPath -BoardFqbn $boardConfig.Fqbn -OutputDirectory $OutputDir
     
-    $firmwarePath = Get-CompiledFirmware -OutputDirectory $OutputDir
+    $firmwarePath = Get-CompiledFirmware -OutputDirectory $OutputDir -BoardConfig $boardConfig
     Write-Info "Firmware ready: $firmwarePath"
 
     # Exit early if build-only mode
@@ -478,10 +564,10 @@ try {
     # Try user-specified port first
     if ($Port) {
         try {
-            Copy-FirmwareViaSerial -CliPath $arduinoCliPath -SketchPath $sketchPath -BoardFqbn $Fqbn -Port $Port
+            Copy-FirmwareViaSerial -CliPath $arduinoCliPath -SketchPath $sketchPath -BoardFqbn $boardConfig.Fqbn -Port $Port
             
             if (-not $NoMonitor) {
-                $monitorPort = Wait-ForSerialPort -CliPath $arduinoCliPath -BoardFqbn $Fqbn -PreferredPort $Port -TimeoutSeconds $MonitorTimeoutSeconds
+                $monitorPort = Wait-ForSerialPort -CliPath $arduinoCliPath -BoardFqbn $boardConfig.Fqbn -PreferredPort $Port -TimeoutSeconds $MonitorTimeoutSeconds
                 if (-not $monitorPort) { 
                     Write-Warn "Could not detect serial port for monitoring; using specified port $Port"
                     $monitorPort = $Port 
@@ -497,7 +583,7 @@ try {
     }
 
     # Auto-detect and try available serial ports
-    $portCandidates = Get-SerialPortCandidates -CliPath $arduinoCliPath -BoardFqbn $Fqbn
+    $portCandidates = Get-SerialPortCandidates -CliPath $arduinoCliPath -BoardFqbn $boardConfig.Fqbn
     
     if (-not $portCandidates -or $portCandidates.Length -eq 0) {
         Write-Warn 'No serial port candidates found; skipping to mass storage.'
@@ -505,7 +591,7 @@ try {
         foreach ($candidate in $portCandidates) {
             Write-Info "Attempting serial upload on $candidate"
             try {
-                Copy-FirmwareViaSerial -CliPath $arduinoCliPath -SketchPath $sketchPath -BoardFqbn $Fqbn -Port $candidate
+                Copy-FirmwareViaSerial -CliPath $arduinoCliPath -SketchPath $sketchPath -BoardFqbn $boardConfig.Fqbn -Port $candidate
                 
                 if (-not $NoMonitor) {
                     Write-Info "Waiting 2 seconds for device to initialize..."
@@ -519,14 +605,19 @@ try {
         }
     }
 
-    # Fall back to mass storage upload
-    Write-Warn 'All serial upload attempts failed. Falling back to mass storage.'
-    
-    Copy-FirmwareViaMassStorage -FirmwarePath $firmwarePath -TimeoutSeconds $TimeoutSeconds
+    # Fall back to mass storage upload (only available for certain boards)
+    if ($boardConfig.Fqbn -like '*rp2040*') {
+        Write-Warn 'All serial upload attempts failed. Falling back to mass storage.'
+        Copy-FirmwareViaMassStorage -FirmwarePath $firmwarePath -TimeoutSeconds $TimeoutSeconds
+    } else {
+        Write-Err "All serial upload attempts failed. Mass storage upload not supported for $($boardConfig.Description)."
+        Write-Err "Please ensure the board is properly connected and try specifying the correct port with -Port parameter."
+        throw "Upload failed for $($boardConfig.Description)"
+    }
     
     if (-not $NoMonitor) {
         Write-Info 'Checking for available serial ports after mass storage deployment...'
-        $preferredPorts, $otherPorts = Get-ArduinoDetectedPorts -CliPath $arduinoCliPath -BoardFqbn $Fqbn
+        $preferredPorts, $otherPorts = Get-ArduinoDetectedPorts -CliPath $arduinoCliPath -BoardFqbn $boardConfig.Fqbn
         $availablePorts = @($preferredPorts) + @($otherPorts)
         
         if ($availablePorts -and $availablePorts.Length -gt 0) {

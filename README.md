@@ -1,6 +1,13 @@
-# Raspberry Pi Pico W Filament Extruder Controller
+# Filament Extruder Controller
 
-An Arduino-based filament extruder controller for the Raspberry Pi Pico W featuring custom I2C configuration, SSD1306 display, analog control inputs, and 4-channel relay heater control. Perfect for 3D printing applications requiring precise temperature control and speed monitoring for filament extrusion.
+An Arduino-based filament extruder controller supporting both Raspberry Pi Pico W and Arduino Uno R3 platforms. Features SSD1306 display, analog control inputs, and 4-channel relay heater control. Perfect for 3D printing applications requiring precise temperature control and speed monitoring for filament extrusion.
+
+## Supported Boards
+
+- **Raspberry Pi Pico W**: Original implementation with custom I2C pins and advanced features
+- **Arduino Uno R3**: Simplified version compatible with standard Arduino hardware
+
+Choose the version that best fits your hardware setup and requirements.
 
 ## Features
 
@@ -32,9 +39,25 @@ An Arduino-based filament extruder controller for the Raspberry Pi Pico W featur
 6. **Upload**: Click Upload. If needed, hold BOOTSEL while connecting USB to enter bootloader.
 7. **Monitor**: Tools → Serial Monitor at 115200 baud.
 
+## Quick Start (Arduino Uno R3)
+
+1. **Install Arduino IDE**: Download from `https://www.arduino.cc/en/software`.
+2. **Select Board and Port**:
+   - Tools → Board: Arduino Uno
+   - Tools → Port: your Arduino's COM port
+3. **Install Libraries** (Sketch → Include Library → Manage Libraries…):
+   - Adafruit SSD1306
+   - Adafruit GFX Library
+   - Adafruit BusIO
+4. **Open the Sketch**: Open `FilamentExtruder_Uno.ino` at the project root
+5. **Upload**: Click Upload button
+6. **Monitor**: Tools → Serial Monitor at 115200 baud.
+
 ## Hardware Requirements
 
-### Main Components
+### Raspberry Pi Pico W Setup
+
+#### Main Components
 - Raspberry Pi Pico W
 - SSD1306 128x64 OLED Display (I2C)
 - 2x I2C ADC modules (ADS1115, ADS1015, or similar)
@@ -44,21 +67,56 @@ An Arduino-based filament extruder controller for the Raspberry Pi Pico W featur
 - 1x Thermistor (100kΩ NTC) with series resistor for temperature sensing
 - Breadboard and jumper wires
 
-### I2C Addresses
+#### I2C Addresses
 - **SSD1306 Display**: 0x3C (default)
 - **ADC Module 1**: 0x35 (reading Speed Control Potentiometer)
 - **ADC Module 2**: 0x36 (reading Temperature Setpoint Potentiometer)
 
-### GPIO Pin Assignments
+#### GPIO Pin Assignments
 - **GPIO8**: I2C SDA
 - **GPIO9**: I2C SCL
 - **GPIO18**: Heater Relay 1 Control
 - **GPIO19**: Heater Relay 2 Control
 - **GPIO20**: Heater Relay 3 Control
 - **GPIO21**: Heater Relay 4 Control
-- **A0**: Thermistor input (if using direct analog reading)
+- **A0**: Thermistor input (direct analog reading)
 
-## Wiring Diagram
+### Arduino Uno R3 Setup
+
+#### Main Components
+- Arduino Uno R3
+- SSD1306 128x64 OLED Display (I2C)
+- 2x Analog potentiometers (10kΩ recommended) - **No ADC modules needed**
+- 4x Relay modules (for heater control)
+- 4x Heating elements (cartridge heaters, resistive heaters, etc.)
+- 1x Thermistor (100kΩ NTC) with series resistor for temperature sensing
+- Breadboard and jumper wires
+
+#### I2C Addresses
+- **SSD1306 Display**: 0x3C (default)
+
+#### Pin Assignments
+- **A4**: I2C SDA (fixed)
+- **A5**: I2C SCL (fixed)
+- **A0**: Thermistor input (direct analog reading)
+- **A1**: Speed Control Potentiometer (direct analog reading)
+- **A2**: Temperature Setpoint Potentiometer (direct analog reading)
+- **Pin 2**: Heater Relay 1 Control
+- **Pin 3**: Heater Relay 2 Control
+- **Pin 4**: Heater Relay 3 Control
+- **Pin 5**: Heater Relay 4 Control
+
+#### Key Differences from Pico W
+- **No I2C ADC modules required** - Uses built-in analog inputs directly
+- **Fixed I2C pins** - A4/A5 cannot be changed
+- **10-bit ADC resolution** - Lower precision than Pico W's 12-bit
+- **5V reference voltage** - Instead of 3.3V on Pico W
+- **Different heater control pins** - Uses digital pins 2-5 instead of GPIO18-21
+- **No mass storage upload** - Must use serial upload only
+
+## Wiring Diagrams
+
+### Raspberry Pi Pico W Connections
 
 ```
 Raspberry Pi Pico W Connections:
@@ -81,7 +139,7 @@ I2C Bus Connections:
 │ GND             │ GND     │ GND     │ GND     │
 └─────────────────┴─────────┴─────────┴─────────┘
 
-Analog Potentiometer Connections:
+Analog Potentiometer Connections (via I2C ADC):
 ┌─────────────────┬─────────┬─────────┐
 │ Potentiometer   │ ADC1    │ ADC2    │
 ├─────────────────┼─────────┼─────────┤
@@ -94,6 +152,38 @@ Analog Potentiometer Connections:
 └─────────────────┴─────────┴─────────┘
 ```
 
+### Arduino Uno R3 Connections
+
+```
+Arduino Uno R3 Connections:
+┌─────────────────┬──────────────────────────┐
+│ Uno Pin         │ Connection               │
+├─────────────────┼──────────────────────────┤
+│ A4              │ I2C SDA                  │
+│ A5              │ I2C SCL                  │
+│ A0              │ Thermistor               │
+│ A1              │ Speed Potentiometer      │
+│ A2              │ Temperature Potentiometer│
+│ Pin 2           │ Heater Relay 1           │
+│ Pin 3           │ Heater Relay 2           │
+│ Pin 4           │ Heater Relay 3           │
+│ Pin 5           │ Heater Relay 4           │
+│ 5V              │ VCC (All devices)        │
+│ GND             │ GND (All devices)        │
+└─────────────────┴──────────────────────────┘
+
+Direct Analog Connections (No ADC modules needed):
+┌─────────────────┬─────────────┬─────────────┐
+│ Component       │ Uno Pin     │ Power       │
+├─────────────────┼─────────────┼─────────────┤
+│ Speed Pot       │ A1 (wiper)  │ 5V/GND      │
+│ Temp Pot        │ A2 (wiper)  │ 5V/GND      │
+│ Thermistor      │ A0          │ 5V/GND      │
+│ Display SDA     │ A4          │ 5V/GND      │
+│ Display SCL     │ A5          │ 5V/GND      │
+└─────────────────┴─────────────┴─────────────┘
+```
+
 ## Build & Deploy (Arduino CLI via PowerShell)
 
 Use the provided PowerShell script to build and deploy with Arduino CLI (auto-installed locally if missing).
@@ -103,37 +193,68 @@ Use the provided PowerShell script to build and deploy with Arduino CLI (auto-in
 - Internet access (downloads Arduino CLI/core/libs on first run)
 
 ### Commands
+
+#### Raspberry Pi Pico W (Default)
 ```powershell
-# Build and wait for RPI-RP2 drive, then copy UF2 automatically
+# Build for Pico W and wait for RPI-RP2 drive, then copy UF2 automatically
 .\build_and_deploy_arduino.ps1
 
-# Build only (no deploy)
-.\build_and_deploy_arduino.ps1 -BuildOnly
-
-# Upload via serial (if you prefer COM upload)
+# Build for Pico W via serial upload
 .\build_and_deploy_arduino.ps1 -Port COM7
 
-# Customize board or output directory
-.\build_and_deploy_arduino.ps1 -Fqbn 'rp2040:rp2040:rpipicow:usbstack=picosdk' -OutputDir .\build
+# Build only for Pico W (no deploy)
+.\build_and_deploy_arduino.ps1 -BuildOnly
+```
+
+#### Arduino Uno R3
+```powershell
+# Build and deploy to Arduino Uno R3 (auto-detect serial port)
+.\build_and_deploy_arduino.ps1 -Board Uno
+
+# Build and deploy to Arduino Uno R3 via specific port
+.\build_and_deploy_arduino.ps1 -Board Uno -Port COM3
+
+# Build only for Arduino Uno R3 (no deploy)
+.\build_and_deploy_arduino.ps1 -Board Uno -BuildOnly
+```
+
+#### Advanced Options
+```powershell
+# Custom board with specific FQBN
+.\build_and_deploy_arduino.ps1 -Board Custom -Fqbn 'arduino:avr:nano'
+
+# Customize output directory
+.\build_and_deploy_arduino.ps1 -Board Uno -OutputDir .\build_uno
+
+# Specify exact sketch file
+.\build_and_deploy_arduino.ps1 -Board Uno -Sketch .\FilamentExtruder_Uno.ino
 ```
 
 ### How it works
 - Installs a portable `arduino-cli` into `.tools` if not found
-- Adds RP2040 board manager URL and installs `rp2040:rp2040`
+- Based on `-Board` parameter, installs appropriate board core:
+  - **Pico W**: Adds RP2040 board manager URL and installs `rp2040:rp2040`
+  - **Uno**: Uses built-in Arduino AVR core
 - Ensures libraries: Adafruit SSD1306, Adafruit GFX Library, Adafruit BusIO
-- Compiles `FilamentExtruder.ino` (root-level)
-- Deploys by either:
-  - Copying the UF2 to the `RPI-RP2` mass storage device (hold BOOTSEL while plugging in USB)
-  - Or uploading over the specified `-Port`
+- Automatically selects board-specific sketch file:
+  - **Pico W**: `FilamentExtruder.ino`
+  - **Uno**: `FilamentExtruder_Uno.ino`
+- Compiles and produces appropriate firmware:
+  - **Pico W**: `.uf2` file
+  - **Uno**: `.hex` file
+- Deploys by:
+  - **Pico W**: Mass storage (RPI-RP2 drive) or serial upload
+  - **Uno**: Serial upload only
 
 ### Script options
+- `-Board <PicoW|Uno|Custom>`: Target board type (default: PicoW)
 - `-BuildOnly`: Build but skip deploy
-- `-Port <COMx>`: Force serial upload
-- `-TimeoutSeconds <n>`: Wait time for `RPI-RP2` drive (default 60)
-- `-Fqbn <id>`: Fully Qualified Board Name (default Pico W with Pico SDK stack)
-- `-OutputDir <path>`: UF2 output directory (default `.\\build`)
+- `-Port <COMx>`: Force serial upload to specific port
+- `-TimeoutSeconds <n>`: Wait time for mass storage device (default 60)
+- `-Fqbn <id>`: Fully Qualified Board Name (required for Custom board)
+- `-OutputDir <path>`: Firmware output directory (default `.\\build`)
 - `-CliPath <path>`: Use a specific `arduino-cli.exe`
-- `-Sketch <path>`: Explicit sketch path (not required when `FilamentExtruder.ino` is in repo root)
+- `-Sketch <path>`: Override automatic sketch selection
 
 ### Configuration
 I2C pins are configured in `FilamentExtruder.ino` using `Wire.setSDA(8)` and `Wire.setSCL(9)` before `Wire.begin()`. If your OLED uses `0x3D`, change `SCREEN_ADDRESS` in the sketch. WiFi is currently disabled; to add later, include `#include <WiFi.h>` and configure credentials in code.

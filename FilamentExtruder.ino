@@ -4,18 +4,17 @@
 #include <Adafruit_SSD1306.h>
 #include <math.h>
 
-// WiFi functionality can be added later by uncommenting:
-// #include <WiFi.h>
+// Board configuration
+#define VREF 5.0  // Arduino Uno uses 5V reference
+#define ADC_BIT_DEPTH 10
+#define ADC_MAX_VALUE ((1 << ADC_BIT_DEPTH) - 1)
 
-// Thermistor constants (powered by VREF)
+// Thermistor constants
 #define THERMISTOR_PIN A0
 #define THERMISTOR_SERIES_RESISTOR 4660 // Measured 4.7k
 #define THERMISTOR_NOMINAL 100000 // 100k unmeasured
 #define TEMPERATURE_NOMINAL 25
 #define B_COEFFICIENT 3950
-#define VREF 3.27  // Measured VREF voltage (3.3V)
-#define ADC_BIT_DEPTH 12
-#define ADC_MAX_VALUE ((1 << ADC_BIT_DEPTH) - 1)
 
 // Display configuration
 #define SCREEN_WIDTH 128
@@ -27,42 +26,32 @@
 // Analog potentiometer pins
 #define POT1_PIN A1
 #define POT2_PIN A2
-#define POT_BIT_DEPTH 12
-#define POT_MAX_VALUE ((1 << POT_BIT_DEPTH) - 1)
 
-#define MAX_TEMPERATURE 300
-
+// Stepper motor settings
 #define TORQUE 1000
-
 #define MAX_SPEED 1000
 
-// Heater control pins (GPIO18-21 for relay control)
-#define HEATER_1_PIN 18
-#define HEATER_2_PIN 19
-#define HEATER_3_PIN 20
-#define HEATER_4_PIN 21
-
-// Configure how many heaters you have connected (1-4)
-#define NUM_HEATERS 4  // Change this to match your setup: 1, 2, 3, or 4
-
-// Configuration examples:
-// #define NUM_HEATERS 1  // Single heater on GPIO18
-// #define NUM_HEATERS 2  // Two heaters on GPIO18-19  
-// #define NUM_HEATERS 3  // Three heaters on GPIO18-20
-// #define NUM_HEATERS 4  // Four heaters on GPIO18-21 (maximum)
+// Heater control pins (Arduino Uno compatible digital pins)
+#define HEATER_1_PIN D2
+#define HEATER_2_PIN D3
+#define HEATER_3_PIN D4
+#define HEATER_4_PIN D5
+#define NUM_HEATERS 2
+#define HEATER_OFF HIGH
+#define HEATER_ON LOW
 
 // Temperature control settings
-#define TARGET_TEMP_DEFAULT 220    // Default target temperature in Celsius
 #define MIN_TARGET_TEMP 10         // Minimum target temperature to enable heaters (prevents accidental heating)
+#define MAX_TARGET_TEMP 300
 #define TEMP_TOLERANCE 2           // Temperature tolerance in degrees
 #define HEATER_PULSE_INTERVAL 1000 // Pulse interval in milliseconds
 #define MAX_HEATER_ON_TIME 30000   // Maximum continuous heater on time (30 seconds)
 #define SAFETY_MAX_TEMP 350        // Safety shutdown temperature
-#define MAX_DUTY_CYCLE 0.95        // Maximum heater duty cycle (85% - prevents 100% on time)
+#define MAX_DUTY_CYCLE 0.95        // Maximum heater duty cycle (95% - prevents 100% on time)
 
 // Control variables
 int targetSpeed = 0;
-int targetTemperature = TARGET_TEMP_DEFAULT;
+int targetTemperature = 0;
 float currentTemperature = 0;
 bool heatersEnabled = false;
 unsigned long lastHeaterUpdate = 0;
@@ -75,7 +64,7 @@ float lastTemperatureError = 0;
 float heaterPower = 0; // 0.0 to 1.0
 unsigned long lastTempUpdate = 0;
 
-// Create display object
+// Create display object (Arduino Uno uses standard I2C pins A4/A5)
 int displayAddress = SCREEN_ADDRESS1;
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
@@ -114,13 +103,13 @@ void setup() {
     delay(100);  // Small delay to prevent tight loop
   }
   
-  Serial.println("Raspberry Pi Pico W I2C Project Starting...");
+  Serial.println("Arduino Uno R3 Filament Extruder Controller Starting...");
   
-  analogReadResolution(ADC_BIT_DEPTH);
+  // Arduino Uno has fixed 10-bit ADC - no analogReadResolution() needed
   delay(100); // Wait for ADC to settle
   (void)analogRead(THERMISTOR_PIN); // Throw away first reading
  
-  // Initialize I2C with custom pins
+  // Initialize I2C (Arduino Uno uses fixed pins A4/A5)
   initializeI2C();
   
   // Scan for I2C devices
@@ -151,7 +140,11 @@ void setup() {
   Serial.println("Clearing any previous safety timeout states...");
   
   Serial.println("Setup complete!");
-  Serial.println("Heater control: GPIO18-21 configured for relay control");
+  Serial.print("Heater control: Digital pins ");
+  Serial.print(HEATER_1_PIN);
+  Serial.print("-");
+  Serial.print(HEATER_1_PIN + NUM_HEATERS - 1);
+  Serial.println(" configured for relay control");
   Serial.print("Target temperature: ");
   Serial.print(targetTemperature);
   Serial.println("°C");
@@ -164,9 +157,9 @@ void loop() {
   pot2Value = readAnalogPot(POT2_PIN);
 
   // Map potentiometer values to control ranges with calibration
-  // Option: Add dead zones if pots don't reach full 0-4095 range
-  targetSpeed = map(constrain(pot1Value, 50, POT_MAX_VALUE - 50), 50, POT_MAX_VALUE - 50, 0, MAX_SPEED);
-  targetTemperature = map(constrain(pot2Value, 50, POT_MAX_VALUE - 50), 50, POT_MAX_VALUE - 50, 0, MAX_TEMPERATURE);
+  // Option: Add dead zones if pots don't reach full 0-1023 range
+  targetSpeed = map(constrain(pot1Value, 10, ADC_MAX_VALUE - 10), 10, ADC_MAX_VALUE - 10, 0, MAX_SPEED);
+  targetTemperature = map(constrain(pot2Value, 10, ADC_MAX_VALUE - 10), 10, ADC_MAX_VALUE - 10, 0, MAX_TARGET_TEMP);
 
   currentTemperature = readTemperature();
   
@@ -242,13 +235,11 @@ void loop() {
 }
 
 void initializeI2C() {
-  // Initialize I2C with custom pins (SDA=GPIO8, SCL=GPIO9)
-  // In Arduino IDE, configure pins explicitly before begin
-  Wire.setSDA(8);
-  Wire.setSCL(9);
+  // Arduino Uno uses fixed I2C pins (A4=SDA, A5=SCL)
+  // No need to set custom pins like on Pico W
   Wire.begin();
   
-  Serial.println("I2C initialized on SDA=GPIO8, SCL=GPIO9");
+  Serial.println("I2C initialized on default pins (A4=SDA, A5=SCL)");
 }
 
 bool initializeDisplay() {
@@ -277,7 +268,8 @@ bool initializeDisplay() {
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
   display.setCursor(0, 0);
-  display.println("Pico W ADC System");
+  display.println("Arduino Uno R3");
+  display.println("Filament Extruder");
   display.println("Initializing...");
   display.display();
   delay(2000);
@@ -331,26 +323,10 @@ uint16_t readAnalogPot(int pin) {
   uint16_t smoothedReading = (uint16_t)(*currentFilter + 0.5); // Round to nearest integer
   
   // Deadband: only update output if change is significant (reduces jitter)
-  const uint16_t deadband = 8; // Ignore changes smaller than this
+  const uint16_t deadband = 3; // Ignore changes smaller than this (adjusted for 10-bit)
   if (abs(smoothedReading - *lastOutput) > deadband) {
     *lastOutput = smoothedReading;
   }
-  
-  // Optional debug output (uncomment to see denoising in action)
-  /*
-  static unsigned long lastDebug = 0;
-  if (millis() - lastDebug > 500) { // Debug every 500ms
-    Serial.print("Pin ");
-    Serial.print(pin == POT1_PIN ? "A1" : "A2");
-    Serial.print(" - Raw: ");
-    Serial.print(rawReading);
-    Serial.print(", Filtered: ");
-    Serial.print(smoothedReading);
-    Serial.print(", Output: ");
-    Serial.println(*lastOutput);
-    lastDebug = millis();
-  }
-  */
   
   return *lastOutput;
 }
@@ -461,100 +437,88 @@ void scanI2CDevices() {
 }
 
 float readTemperature() {
-  // Static variables for temperature denoising
+  // Static variables for temperature denoising and 1Hz sampling
   static float filteredADC = 0;
   static float filteredTemperature = 0;
   static bool tempInitialized = false;
-  
-  // Read raw ADC value
-  int rawADC = analogRead(THERMISTOR_PIN);
-  
-  // Initialize filters on first call
-  if (!tempInitialized) {
-    filteredADC = rawADC;
-    tempInitialized = true;
-  }
-  
-  // First-stage filter: Smooth ADC readings (faster response for electrical noise)
-  const float adcSmoothingFactor = 0.3; // More responsive than pot filters
-  filteredADC = (adcSmoothingFactor * rawADC) + ((1.0 - adcSmoothingFactor) * filteredADC);
-  
-  // Use filtered ADC value for calculations
-  int smoothedRaw = (int)(filteredADC + 0.5); // Round to nearest integer
-  
-  // Calculate resistance using measured VREF and series resistor values
-  float voltage = smoothedRaw * (VREF / (float)ADC_MAX_VALUE);
-  float resistance = THERMISTOR_SERIES_RESISTOR * voltage / (VREF - voltage);
-  
-  // Steinhart-Hart equation
-  float steinhart = resistance / THERMISTOR_NOMINAL;
-  steinhart = log(steinhart);
-  steinhart /= B_COEFFICIENT;
-  steinhart += 1.0 / (TEMPERATURE_NOMINAL + 273.15);
-  steinhart = 1.0 / steinhart;
-  steinhart -= 273.15;
-  
-  // Second-stage filter: Smooth final temperature (slower, for thermal stability)
-  if (!tempInitialized) {
-    filteredTemperature = steinhart;
-    tempInitialized = true;
-  }
-  
-  const float tempSmoothingFactor = 0.1; // Very smooth for temperature stability
-  filteredTemperature = (tempSmoothingFactor * steinhart) + ((1.0 - tempSmoothingFactor) * filteredTemperature);
-  
-  // Temperature deadband: only significant changes update the output
+  static unsigned long lastSampleTime = 0;
   static float lastTempOutput = 25.0; // Default room temperature
-  const float tempDeadband = 0.5; // Ignore changes smaller than 0.5°C
   
-  if (fabs(filteredTemperature - lastTempOutput) > tempDeadband) {
-    lastTempOutput = filteredTemperature;
+  // 1Hz sampling: Only read ADC once per second to prevent self-heating
+  unsigned long currentTime = millis();
+  const unsigned long sampleInterval = 1000; // 1000ms = 1Hz
+  
+  // Check if it's time for a new sample
+  if (currentTime - lastSampleTime >= sampleInterval || !tempInitialized) {
+    // Read raw ADC value
+    int rawADC = analogRead(THERMISTOR_PIN);
+    
+    // Initialize filters on first call
+    if (!tempInitialized) {
+      filteredADC = rawADC;
+      tempInitialized = true;
+      lastSampleTime = currentTime;
+    }
+    
+    // First-stage filter: Smooth ADC readings (faster response for electrical noise)
+    const float adcSmoothingFactor = 0.3; // More responsive than pot filters
+    filteredADC = (adcSmoothingFactor * rawADC) + ((1.0 - adcSmoothingFactor) * filteredADC);
+    
+    // Use filtered ADC value for calculations
+    int smoothedRaw = (int)(filteredADC + 0.5); // Round to nearest integer
+    
+    // Calculate resistance using VREF and series resistor values
+    float voltage = smoothedRaw * (VREF / (float)ADC_MAX_VALUE);
+    float resistance = THERMISTOR_SERIES_RESISTOR * voltage / (VREF - voltage);
+    
+    // Steinhart-Hart equation
+    float steinhart = resistance / THERMISTOR_NOMINAL;
+    steinhart = log(steinhart);
+    steinhart /= B_COEFFICIENT;
+    steinhart += 1.0 / (TEMPERATURE_NOMINAL + 273.15);
+    steinhart = 1.0 / steinhart;
+    steinhart -= 273.15;
+    
+    // Second-stage filter: Smooth final temperature (slower, for thermal stability)
+    const float tempSmoothingFactor = 0.1; // Very smooth for temperature stability
+    filteredTemperature = (tempSmoothingFactor * steinhart) + ((1.0 - tempSmoothingFactor) * filteredTemperature);
+    
+    // Temperature deadband: only significant changes update the output
+    const float tempDeadband = 0.5; // Ignore changes smaller than 0.5°C
+    
+    if (fabs(filteredTemperature - lastTempOutput) > tempDeadband) {
+      lastTempOutput = filteredTemperature;
+    }
+    
+    // Update sample time
+    lastSampleTime = currentTime;
   }
   
-  // Optional debug output for temperature denoising
-  /*
-  static unsigned long lastTempDebug = 0;
-  if (millis() - lastTempDebug > 2000) { // Debug every 2 seconds
-    Serial.print("Thermistor - Raw ADC: ");
-    Serial.print(rawADC);
-    Serial.print(", Filtered ADC: ");
-    Serial.print(smoothedRaw);
-    Serial.print(", Raw Temp: ");
-    Serial.print(steinhart, 2);
-    Serial.print("°C, Filtered Temp: ");
-    Serial.print(lastTempOutput, 2);
-    Serial.println("°C");
-    lastTempDebug = millis();
-  }
-  */
-  
+  // Always return the last valid temperature (cached between samples)
   return lastTempOutput;
 }
 
 void initializeHeaters() {
-  // Configure GPIO pins as outputs for relay control (only the ones you're using)
+  // Configure digital pins as outputs for relay control (only the ones you're using)
   if (NUM_HEATERS >= 1) pinMode(HEATER_1_PIN, OUTPUT);
   if (NUM_HEATERS >= 2) pinMode(HEATER_2_PIN, OUTPUT);
   if (NUM_HEATERS >= 3) pinMode(HEATER_3_PIN, OUTPUT);
   if (NUM_HEATERS >= 4) pinMode(HEATER_4_PIN, OUTPUT);
   
-  // Configure GPIO28 as VREF output (limited current)
-  pinMode(28, OUTPUT);
-  digitalWrite(28, HIGH);  // Set GPIO28 to VREF
-  
-  // Initialize connected heaters to OFF (HIGH = OFF for low-triggered relays)
-  if (NUM_HEATERS >= 1) digitalWrite(HEATER_1_PIN, HIGH);
-  if (NUM_HEATERS >= 2) digitalWrite(HEATER_2_PIN, HIGH);
-  if (NUM_HEATERS >= 3) digitalWrite(HEATER_3_PIN, HIGH);
-  if (NUM_HEATERS >= 4) digitalWrite(HEATER_4_PIN, HIGH);
+  // Initialize connected heaters to OFF
+  if (NUM_HEATERS >= 1) digitalWrite(HEATER_1_PIN, HEATER_OFF);
+  if (NUM_HEATERS >= 2) digitalWrite(HEATER_2_PIN, HEATER_OFF);
+  if (NUM_HEATERS >= 3) digitalWrite(HEATER_3_PIN, HEATER_OFF);
+  if (NUM_HEATERS >= 4) digitalWrite(HEATER_4_PIN, HEATER_OFF);
   
   Serial.print("Heater control pins initialized: ");
   Serial.print(NUM_HEATERS);
-  Serial.print(" heater(s) connected on GPIO18");
+  Serial.print(" heater(s) connected on digital pins ");
+  Serial.print(HEATER_1_PIN);
   if (NUM_HEATERS > 1) Serial.print("-");
-  if (NUM_HEATERS > 1) Serial.print(17 + NUM_HEATERS);
+  if (NUM_HEATERS > 1) Serial.print(HEATER_1_PIN + NUM_HEATERS - 1);
   Serial.println();
-  Serial.println("All connected heaters initialized to OFF state (HIGH = OFF for low-triggered relays)");
+  Serial.println("All connected heaters initialized to OFF state");
   
   Serial.print("Heater pulse interval: ");
   Serial.print(HEATER_PULSE_INTERVAL);
@@ -576,8 +540,8 @@ void initializeHeaters() {
   Serial.print("°C - ");
   Serial.print(SAFETY_MAX_TEMP);
   Serial.println("°C");
-  Serial.println("GPIO28 set to HIGH (VREF) - for I2C pull-up resistors");
-  Serial.println("Use VREF (Pin 35) for thermistor power, VREF (Pin 36) for I2C devices");
+  Serial.println("Thermistor sampling: 1Hz (prevents self-heating)");
+  Serial.println("Using Arduino Uno 5V reference for thermistor and ADC");
 }
 
 void updateTemperatureControl() {
@@ -846,8 +810,7 @@ void setHeaterState(int heaterIndex, bool state) {
     default: return;
   }
   
-  // Low-triggered relays: LOW = relay ON, HIGH = relay OFF
-  digitalWrite(pin, state ? LOW : HIGH);
+  digitalWrite(pin, state ? HEATER_ON : HEATER_OFF);
   heaterState[heaterIndex] = state;
 }
 
@@ -891,5 +854,3 @@ void emergencyShutdown() {
   heaterPower = 0;
   heaterOnTime = 0;
 }
-
-
