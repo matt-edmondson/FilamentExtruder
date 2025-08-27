@@ -61,6 +61,13 @@
 // ========================================
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 128           // SSD1351 is 128x128
+
+// Display refresh settings
+#define DISPLAY_UPDATE_INTERVAL_MS 300            // Display update rate: 50ms = 20Hz, 100ms = 10Hz, 16ms = 60Hz
+                                                 // Adjust: 16ms = 60Hz (very smooth), 50ms = 20Hz (smooth), 100ms = 10Hz (efficient)
+#define DISPLAY_FULL_REFRESH_INTERVAL_MS 300000  // Full screen refresh every 5 minutes (300000ms)
+                                                 // Adjust: 60000 = 1min, 300000 = 5min, 600000 = 10min
+
 // SSD1351 Color Definitions (16-bit RGB565)
 #define SSD1351_BLACK 0x0000
 #define SSD1351_BLUE 0x001F
@@ -70,6 +77,7 @@
 #define SSD1351_MAGENTA 0xF81F
 #define SSD1351_YELLOW 0xFFE0  
 #define SSD1351_WHITE 0xFFFF
+
 // Legacy I2C addresses (kept for potential fallback)
 #define I2C_SCREEN_ADDRESS1 0x3C
 #define I2C_SCREEN_ADDRESS2 0x3D
@@ -202,8 +210,12 @@ void loop() {
   // Update heater control based on temperature
   updateHeaterControl();
 
-  // Update display
-  updateDisplay();
+  // Update display at configurable rate (reduces CPU load and SPI traffic)
+  static unsigned long lastDisplayUpdate = 0;
+  if (millis() - lastDisplayUpdate >= DISPLAY_UPDATE_INTERVAL_MS) {
+    updateDisplay();
+    lastDisplayUpdate = millis();
+  }
   
   // Print debug info only when values change significantly or periodically when stable
   static unsigned long lastDebug = 0;
@@ -334,8 +346,8 @@ uint16_t readAnalogPot(int pin) {
     initialized = true;
   }
   
-  // Exponential moving average filter (adjustable smoothing)
-  const float smoothingFactor = 0.15; // 0.05 = very smooth, 0.3 = more responsive
+  // Exponential moving average filter (adjustable smoothing) - optimized for UI responsiveness
+  const float smoothingFactor = 0.4; // 0.05 = very smooth, 0.3 = more responsive, 0.4 = UI responsive
   
   float* currentFilter;
   if (pin == SPEED_POT_PIN) {
@@ -362,8 +374,8 @@ uint16_t readAnalogPot(int pin) {
   
   uint16_t smoothedReading = (uint16_t)(*currentFilter + 0.5); // Round to nearest integer
   
-  // Deadband: only update output if change is significant (reduces jitter)
-  const uint16_t deadband = 3; // Ignore changes smaller than this (adjusted for 10-bit)
+  // Deadband: only update output if change is significant (reduces jitter) - reduced for UI responsiveness  
+  const uint16_t deadband = 1; // Ignore changes smaller than this (reduced from 3 for faster response)
   if (abs(smoothedReading - *lastOutput) > deadband) {
     *lastOutput = smoothedReading;
   }
@@ -382,15 +394,15 @@ void updateDisplay() {
   static bool lastHeaterStates[4] = {false, false, false, false};
   static unsigned long lastFullRefresh = 0;
   
-  // Force full refresh every 10 seconds or on first run
+  // Force full refresh at configurable interval or on first run (prevents long-term display corruption)
   unsigned long currentTime = millis();
-  bool forceFullRefresh = !displayInitialized || (currentTime - lastFullRefresh > 10000);
+  bool forceFullRefresh = !displayInitialized || (currentTime - lastFullRefresh > DISPLAY_FULL_REFRESH_INTERVAL_MS);
   
-  // Check if any values have changed significantly
-  bool speedChanged = (abs(targetSpeed - lastTargetSpeed) > 5);
-  bool targetTempChanged = (abs(targetTemperature - lastTargetTemp) > 1);
-  bool currentTempChanged = (abs(currentTemperature - lastCurrentTemp) > 0.5);
-  bool powerChanged = (abs(heaterPower - lastHeaterPower) > 0.02);
+  // Check if any values have changed significantly (reduced thresholds for UI responsiveness)
+  bool speedChanged = (abs(targetSpeed - lastTargetSpeed) > 2);        // Reduced from 5 to 2 RPM
+  bool targetTempChanged = (abs(targetTemperature - lastTargetTemp) > 0.5);  // Reduced from 1 to 0.5°C
+  bool currentTempChanged = (abs(currentTemperature - lastCurrentTemp) > 0.3); // Reduced from 0.5 to 0.3°C
+  bool powerChanged = (abs(heaterPower - lastHeaterPower) > 0.01);     // Reduced from 0.02 to 0.01 (1% vs 2%)
   bool heatersEnabledChanged = (heatersEnabled != lastHeatersEnabled);
   
   bool heaterStateChanged = false;
