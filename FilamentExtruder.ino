@@ -207,22 +207,22 @@ void loop() {
   
   // Print debug info only when values change significantly or periodically when stable
   static unsigned long lastDebug = 0;
-  static int lastTargetSpeed = -1;
-  static int lastTargetTemp = -1; 
-  static float lastCurrentTemp = -999;
-  static float lastHeaterPower = -1;
-  static bool lastHeaterStates[4] = {false, false, false, false};
+  static int lastDebugTargetSpeed = -1;
+  static int lastDebugTargetTemp = -1; 
+  static float lastDebugCurrentTemp = -999;
+  static float lastDebugHeaterPower = -1;
+  static bool lastDebugHeaterStates[4] = {false, false, false, false};
   
   // Check if any significant values have changed
   bool valuesChanged = false;
-  if (abs(targetSpeed - lastTargetSpeed) > 10) valuesChanged = true;           // Speed change > 10 RPM
-  if (abs(targetTemperature - lastTargetTemp) > 2) valuesChanged = true;       // Temp setting change > 2°C
-  if (fabs(currentTemperature - lastCurrentTemp) > 1.0) valuesChanged = true; // Temp reading change > 1°C
-  if (fabs(heaterPower - lastHeaterPower) > 0.05) valuesChanged = true;        // Power change > 5%
+  if (abs(targetSpeed - lastDebugTargetSpeed) > 10) valuesChanged = true;           // Speed change > 10 RPM
+  if (abs(targetTemperature - lastDebugTargetTemp) > 2) valuesChanged = true;       // Temp setting change > 2°C
+  if (fabs(currentTemperature - lastDebugCurrentTemp) > 1.0) valuesChanged = true; // Temp reading change > 1°C
+  if (fabs(heaterPower - lastDebugHeaterPower) > 0.05) valuesChanged = true;        // Power change > 5%
   
       // Check if heater states changed
     for (int i = 0; i < NUM_HEATERS; i++) {
-      if (heaterState[i] != lastHeaterStates[i]) {
+      if (heaterState[i] != lastDebugHeaterStates[i]) {
         valuesChanged = true;
         break;
       }
@@ -254,13 +254,13 @@ void loop() {
     }
     Serial.println();
     
-    // Update last values
-    lastTargetSpeed = targetSpeed;
-    lastTargetTemp = targetTemperature;
-    lastCurrentTemp = currentTemperature;
-    lastHeaterPower = heaterPower;
+    // Update last debug values
+    lastDebugTargetSpeed = targetSpeed;
+    lastDebugTargetTemp = targetTemperature;
+    lastDebugCurrentTemp = currentTemperature;
+    lastDebugHeaterPower = heaterPower;
     for (int i = 0; i < NUM_HEATERS; i++) {
-      lastHeaterStates[i] = heaterState[i];
+      lastDebugHeaterStates[i] = heaterState[i];
     }
     
     lastDebug = millis();
@@ -372,125 +372,206 @@ uint16_t readAnalogPot(int pin) {
 }
 
 void updateDisplay() {
-  // Clear display with black background
-  display.fillScreen(SSD1351_BLACK);
+  // Static variables to track display state and reduce unnecessary updates
+  static bool displayInitialized = false;
+  static int lastTargetSpeed = -1;
+  static int lastTargetTemp = -1;
+  static float lastCurrentTemp = -999.0;
+  static float lastHeaterPower = -1.0;
+  static bool lastHeatersEnabled = false;
+  static bool lastHeaterStates[4] = {false, false, false, false};
+  static unsigned long lastFullRefresh = 0;
   
-  // Draw colored border
-  display.drawRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, SSD1351_BLUE);
+  // Force full refresh every 10 seconds or on first run
+  unsigned long currentTime = millis();
+  bool forceFullRefresh = !displayInitialized || (currentTime - lastFullRefresh > 10000);
   
-  // Title and status section
-  display.setTextSize(1);
-  display.setCursor(5, 5);
-  display.setTextColor(SSD1351_WHITE);
-  display.print("Filament Extruder");
+  // Check if any values have changed significantly
+  bool speedChanged = (abs(targetSpeed - lastTargetSpeed) > 5);
+  bool targetTempChanged = (abs(targetTemperature - lastTargetTemp) > 1);
+  bool currentTempChanged = (abs(currentTemperature - lastCurrentTemp) > 0.5);
+  bool powerChanged = (abs(heaterPower - lastHeaterPower) > 0.02);
+  bool heatersEnabledChanged = (heatersEnabled != lastHeatersEnabled);
   
-  // Safety status with color coding
-  display.setCursor(5, 18);
-  if (currentTemperature > SAFETY_MAX_TEMP - 20) {
-    display.setTextColor(SSD1351_RED);
-    display.print("! OVERHEATING !");
-  } else if (!heatersEnabled) {
-    display.setTextColor(SSD1351_YELLOW);
-    display.print("STANDBY");
-  } else {
-    display.setTextColor(SSD1351_GREEN);
-    display.print("RUNNING");
-  }
-  
-  // Draw horizontal separator
-  display.drawLine(5, 32, SCREEN_WIDTH-5, 32, SSD1351_CYAN);
-  
-  // Speed control section
-  display.setCursor(5, 38);
-  display.setTextColor(SSD1351_WHITE);
-  display.print("Speed: ");
-  display.setTextColor(SSD1351_CYAN);
-  display.print(targetSpeed);
-  display.setTextColor(SSD1351_WHITE);
-  display.print(" RPM");
-  
-  // Temperature target
-  display.setCursor(5, 50);
-  display.setTextColor(SSD1351_WHITE);
-  display.print("Target: ");
-  display.setTextColor(SSD1351_YELLOW);
-  display.print(targetTemperature);
-  display.setTextColor(SSD1351_WHITE);
-  display.print("C");
-  
-  // Current temperature
-  display.setCursor(5, 62);
-  display.setTextColor(SSD1351_WHITE);
-  display.print("Current: ");
-  // Color code temperature based on proximity to target
-  float tempDiff = abs(currentTemperature - targetTemperature);
-  if (tempDiff < 5) {
-    display.setTextColor(SSD1351_GREEN);  // Close to target
-  } else if (tempDiff < 15) {
-    display.setTextColor(SSD1351_YELLOW); // Moderately close
-  } else {
-    display.setTextColor(SSD1351_RED);    // Far from target
-  }
-  display.print(currentTemperature, 1);
-  display.setTextColor(SSD1351_WHITE);
-  display.print("C");
-  
-  // Enhanced temperature progress bar
-  int barY = 78;
-  int barHeight = 8;
-  int barWidth = SCREEN_WIDTH - 20;
-  int tempBarFill = 0;
-  if (targetTemperature > 0) {
-    tempBarFill = map(constrain(currentTemperature, 0, targetTemperature), 0, targetTemperature, 0, barWidth);
-  }
-  
-  // Draw temperature bar background
-  display.drawRect(10, barY, barWidth, barHeight, SSD1351_WHITE);
-  display.fillRect(11, barY+1, barWidth-2, barHeight-2, SSD1351_BLACK);
-  
-  // Fill temperature bar with gradient effect
-  if (tempBarFill > 0) {
-    // Create color gradient from blue (cold) to red (hot)
-    for (int x = 0; x < tempBarFill-2; x++) {
-      uint16_t barColor;
-      if (x < tempBarFill/3) {
-        barColor = SSD1351_BLUE;
-      } else if (x < (2*tempBarFill)/3) {
-        barColor = SSD1351_YELLOW;
-      } else {
-        barColor = SSD1351_RED;
-      }
-      display.drawLine(11+x, barY+1, 11+x, barY+barHeight-2, barColor);
+  bool heaterStateChanged = false;
+  for (int i = 0; i < NUM_HEATERS; i++) {
+    if (heaterState[i] != lastHeaterStates[i]) {
+      heaterStateChanged = true;
+      break;
     }
   }
   
-  // Heater status section with color coding
-  display.setCursor(5, 92);
-  display.setTextColor(SSD1351_WHITE);
-  display.print("Heaters: ");
-  for (int i = 0; i < NUM_HEATERS; i++) {
-    display.setTextColor(heaterState[i] ? SSD1351_RED : SSD1351_GREEN);
-    display.print(heaterState[i] ? "ON " : "OFF");
-    if (i < NUM_HEATERS - 1) display.print(" ");
+  bool anyChanges = speedChanged || targetTempChanged || currentTempChanged || 
+                   powerChanged || heatersEnabledChanged || heaterStateChanged;
+  
+  // Skip update if nothing changed and not forcing refresh
+  if (!anyChanges && !forceFullRefresh) {
+    return;
   }
   
-  // Power indicator with visual bar
-  display.setCursor(5, 104);
-  display.setTextColor(SSD1351_WHITE);
-  display.print("Power: ");
-  display.setTextColor(SSD1351_MAGENTA);
-  display.print((int)(heaterPower * 100));
-  display.setTextColor(SSD1351_WHITE);
-  display.print("%");
+  // Only clear screen on first initialization or major changes
+  if (!displayInitialized || forceFullRefresh) {
+    display.fillScreen(SSD1351_BLACK);
+    
+    // Draw static elements (border, labels, separator lines)
+    display.drawRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, SSD1351_BLUE);
+    display.drawLine(5, 32, SCREEN_WIDTH-5, 32, SSD1351_CYAN);
+    
+    // Static title
+    display.setTextSize(1);
+    display.setCursor(5, 5);
+    display.setTextColor(SSD1351_WHITE);
+    display.print("Filament Extruder");
+    
+    // Static labels
+    display.setCursor(5, 38);
+    display.setTextColor(SSD1351_WHITE);
+    display.print("Speed:");
+    
+    display.setCursor(5, 50);
+    display.print("Target:");
+    
+    display.setCursor(5, 62);
+    display.print("Current:");
+    
+    display.setCursor(5, 92);
+    display.print("Heaters:");
+    
+    display.setCursor(5, 104);
+    display.print("Power:");
+    
+    // Draw static bar outlines
+    display.drawRect(10, 78, SCREEN_WIDTH-20, 8, SSD1351_WHITE); // Temp bar
+    display.drawRect(5, 116, 62, 6, SSD1351_WHITE); // Power bar
+    
+    displayInitialized = true;
+    lastFullRefresh = currentTime;
+  }
   
-  // Power level bar
-  int powerBarWidth = map(heaterPower * 100, 0, 100, 0, 60);
-  display.drawRect(5, 116, 62, 6, SSD1351_WHITE);
-  display.fillRect(6, 117, 60, 4, SSD1351_BLACK);
-  if (powerBarWidth > 0) {
-    uint16_t powerColor = (heaterPower > 0.7) ? SSD1351_RED : 
-                         (heaterPower > 0.4) ? SSD1351_YELLOW : SSD1351_GREEN;
-    display.fillRect(6, 117, powerBarWidth, 4, powerColor);
+  // Update dynamic content only in specific regions
+  
+  // Status area (18-30)
+  if (heatersEnabledChanged || forceFullRefresh) {
+    display.fillRect(5, 18, SCREEN_WIDTH-10, 12, SSD1351_BLACK); // Clear status area
+    display.setCursor(5, 18);
+    if (currentTemperature > SAFETY_MAX_TEMP - 20) {
+      display.setTextColor(SSD1351_RED);
+      display.print("! OVERHEATING !");
+    } else if (!heatersEnabled) {
+      display.setTextColor(SSD1351_YELLOW);
+      display.print("STANDBY");
+    } else {
+      display.setTextColor(SSD1351_GREEN);
+      display.print("RUNNING");
+    }
+  }
+  
+  // Speed value area
+  if (speedChanged || forceFullRefresh) {
+    display.fillRect(50, 38, 70, 8, SSD1351_BLACK); // Clear speed value area
+    display.setCursor(50, 38);
+    display.setTextColor(SSD1351_CYAN);
+    display.print(targetSpeed);
+    display.setTextColor(SSD1351_WHITE);
+    display.print(" RPM");
+  }
+  
+  // Target temperature area
+  if (targetTempChanged || forceFullRefresh) {
+    display.fillRect(55, 50, 65, 8, SSD1351_BLACK); // Clear target temp area
+    display.setCursor(55, 50);
+    display.setTextColor(SSD1351_YELLOW);
+    display.print(targetTemperature);
+    display.setTextColor(SSD1351_WHITE);
+    display.print("C");
+  }
+  
+  // Current temperature area
+  if (currentTempChanged || forceFullRefresh) {
+    display.fillRect(60, 62, 60, 8, SSD1351_BLACK); // Clear current temp area
+    display.setCursor(60, 62);
+    // Color code temperature based on proximity to target
+    float tempDiff = abs(currentTemperature - targetTemperature);
+    if (tempDiff < 5) {
+      display.setTextColor(SSD1351_GREEN);  // Close to target
+    } else if (tempDiff < 15) {
+      display.setTextColor(SSD1351_YELLOW); // Moderately close
+    } else {
+      display.setTextColor(SSD1351_RED);    // Far from target
+    }
+    display.print(currentTemperature, 1);
+    display.setTextColor(SSD1351_WHITE);
+    display.print("C");
+  }
+  
+  // Temperature progress bar (only redraw if temperature changed)
+  if (currentTempChanged || targetTempChanged || forceFullRefresh) {
+    int barY = 78;
+    int barHeight = 8;
+    int barWidth = SCREEN_WIDTH - 20;
+    
+    // Clear bar interior
+    display.fillRect(11, barY+1, barWidth-2, barHeight-2, SSD1351_BLACK);
+    
+    int tempBarFill = 0;
+    if (targetTemperature > 0) {
+      tempBarFill = map(constrain(currentTemperature, 0, targetTemperature), 0, targetTemperature, 0, barWidth-2);
+    }
+    
+    // Fill temperature bar with gradient effect
+    if (tempBarFill > 0) {
+      for (int x = 0; x < tempBarFill; x++) {
+        uint16_t barColor;
+        if (x < tempBarFill/3) {
+          barColor = SSD1351_BLUE;
+        } else if (x < (2*tempBarFill)/3) {
+          barColor = SSD1351_YELLOW;
+        } else {
+          barColor = SSD1351_RED;
+        }
+        display.drawLine(11+x, barY+1, 11+x, barY+barHeight-2, barColor);
+      }
+    }
+  }
+  
+  // Heater status area
+  if (heaterStateChanged || forceFullRefresh) {
+    display.fillRect(65, 92, 55, 8, SSD1351_BLACK); // Clear heater status area
+    display.setCursor(65, 92);
+    for (int i = 0; i < NUM_HEATERS; i++) {
+      display.setTextColor(heaterState[i] ? SSD1351_RED : SSD1351_GREEN);
+      display.print(heaterState[i] ? "ON " : "OFF");
+      if (i < NUM_HEATERS - 1) display.print(" ");
+    }
+  }
+  
+  // Power indicator area
+  if (powerChanged || forceFullRefresh) {
+    display.fillRect(45, 104, 75, 8, SSD1351_BLACK); // Clear power value area
+    display.setCursor(45, 104);
+    display.setTextColor(SSD1351_MAGENTA);
+    display.print((int)(heaterPower * 100));
+    display.setTextColor(SSD1351_WHITE);
+    display.print("%");
+    
+    // Power level bar
+    display.fillRect(6, 117, 60, 4, SSD1351_BLACK); // Clear bar interior
+    int powerBarWidth = map(heaterPower * 100, 0, 100, 0, 60);
+    if (powerBarWidth > 0) {
+      uint16_t powerColor = (heaterPower > 0.7) ? SSD1351_RED : 
+                           (heaterPower > 0.4) ? SSD1351_YELLOW : SSD1351_GREEN;
+      display.fillRect(6, 117, powerBarWidth, 4, powerColor);
+    }
+  }
+  
+  // Update last known values
+  lastTargetSpeed = targetSpeed;
+  lastTargetTemp = targetTemperature;
+  lastCurrentTemp = currentTemperature;
+  lastHeaterPower = heaterPower;
+  lastHeatersEnabled = heatersEnabled;
+  for (int i = 0; i < NUM_HEATERS; i++) {
+    lastHeaterStates[i] = heaterState[i];
   }
 }
 
@@ -508,7 +589,7 @@ void scanI2CDevices() {
       Serial.print(address, HEX);
       
       // Add known device identification
-      if (address == SCREEN_ADDRESS1 || address == SCREEN_ADDRESS2) {
+      if (address == I2C_SCREEN_ADDRESS1 || address == I2C_SCREEN_ADDRESS2) {
         Serial.print(" (SSD1306 OLED)");
       }
       Serial.println();
@@ -528,9 +609,9 @@ void scanI2CDevices() {
     Serial.println("No I2C devices found - Check wiring and pull-up resistors!");
     Serial.println("Expected devices:");
     Serial.print("  - ");
-    Serial.print(SCREEN_ADDRESS1, HEX);
+    Serial.print(I2C_SCREEN_ADDRESS1, HEX);
     Serial.print("/");
-    Serial.print(SCREEN_ADDRESS2, HEX);
+    Serial.print(I2C_SCREEN_ADDRESS2, HEX);
     Serial.println(": SSD1306 Display");
     Serial.print("  - ");
     Serial.print(I2C_SDA_PIN);
