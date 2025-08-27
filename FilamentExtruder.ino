@@ -240,29 +240,20 @@ void loop() {
       }
     }
   
-  // Print debug info when values change OR every 10 seconds when stable (reduce spam)
-  if (valuesChanged || (millis() - lastDebug > 10000)) {
-    Serial.print("Pot1: ");
-    Serial.print(pot1Value);
-    Serial.print(" | Pot2: ");
-    Serial.print(pot2Value);
-    Serial.print(" | Speed: ");
+  // Reduced debug info - only print when significant changes occur OR every 30 seconds
+  if (valuesChanged || (millis() - lastDebug > 30000)) {
+    Serial.print("Speed: ");
     Serial.print(targetSpeed);
-    Serial.print(" | Current Temp: ");
+    Serial.print(" RPM | Temp: ");
     Serial.print(currentTemperature, 1);
-    Serial.print("°C | Target Temp: ");
+    Serial.print("/");
     Serial.print(targetTemperature);
-    Serial.print("°C | Heater Power: ");
-    Serial.print(heaterPower * 100, 1);
-    Serial.print("% | Heaters (");
-    Serial.print(NUM_HEATERS);
-    Serial.print(" connected): ");
+    Serial.print("°C | Power: ");
+    Serial.print((int)(heaterPower * 100));
+    Serial.print("% | Heaters: ");
     for (int i = 0; i < NUM_HEATERS; i++) {
-      Serial.print("H");
-      Serial.print(i + 1);
-      Serial.print(":");
       Serial.print(heaterState[i] ? "ON" : "OFF");
-      if (i < NUM_HEATERS - 1) Serial.print(" ");
+      if (i < NUM_HEATERS - 1) Serial.print(",");
     }
     Serial.println();
     
@@ -833,19 +824,28 @@ void updateHeaterControl() {
   static bool safetyWarningShown = false;
   static unsigned long anyHeaterOnTime = 0;
   static unsigned long safetyTimeoutStart = 0;
+  static bool lastDisabledLogged = false; // Track heater disabled logging state
   
-  // Debug: Print heater control status
+  // Reduced heater debug - only when there are issues or every 60 seconds
   static unsigned long lastHeaterDebug = 0;
-  if (millis() - lastHeaterDebug > 2000) { // Debug every 2 seconds
-    Serial.print("HEATER DEBUG - Enabled: ");
-    Serial.print(heatersEnabled ? "YES" : "NO");
-    Serial.print(", Power: ");
-    Serial.print(heaterPower * 100, 1);
-    Serial.print("%, Target: ");
-    Serial.print(targetTemperature);
-    Serial.print("°C, Current: ");
+  static bool lastSafetyWarning = false;
+  bool hasWarnings = (currentTemperature > SAFETY_MAX_TEMP - 30) || !heatersEnabled;
+  
+  if (hasWarnings || (millis() - lastHeaterDebug > 60000)) { // Debug every 60 seconds or when warnings
+    if (hasWarnings) {
+      Serial.print("⚠️ HEATER: ");
+      if (currentTemperature > SAFETY_MAX_TEMP - 30) Serial.print("HIGH TEMP ");
+      if (!heatersEnabled) Serial.print("DISABLED ");
+      Serial.print("- ");
+    } else {
+      Serial.print("Heater Status: ");
+    }
     Serial.print(currentTemperature, 1);
-    Serial.println("°C");
+    Serial.print("°C/");
+    Serial.print(targetTemperature);
+    Serial.print("°C @ ");
+    Serial.print((int)(heaterPower * 100));
+    Serial.println("%");
     lastHeaterDebug = millis();
   }
   
@@ -871,15 +871,18 @@ void updateHeaterControl() {
       wasDisabled = true;
     }
     
-    if (millis() - lastHeaterDebug < 100) {
-      Serial.println("  -> Heaters DISABLED, forcing all OFF");
+    // Reduced debug: Only log state changes
+    if (!lastDisabledLogged) {
+      Serial.println("Heaters DISABLED");
+      lastDisabledLogged = true;
     }
     return;
   } else {
     // Reset disabled state flag when heaters are enabled again
     if (wasDisabled) {
-      Serial.println("  -> Heaters RE-ENABLED - ready to heat");
+      Serial.println("Heaters RE-ENABLED");
       wasDisabled = false;
+      lastDisabledLogged = false; // Reset so we can log next disable
     }
   }
   
@@ -936,36 +939,25 @@ void updateHeaterControl() {
   // Safety timing based on any heater being on
   // (variables now declared at function start)
   
-  // Debug safety timeout status and check for NaN/overflow issues
-  if (millis() - lastHeaterDebug < 100) {
-    Serial.print("  -> Safety: Warning=");
-    Serial.print(safetyWarningShown ? "YES" : "NO");
-    
-    // Check for timer overflow/NaN issues
+  // Check for critical issues (NaN/overflow) but don't spam debug output
+  static unsigned long lastSafetyCheck = 0;
+  if (millis() - lastSafetyCheck > 30000) { // Only check every 30 seconds
+    // Check for timer overflow/NaN issues - only report problems
     if (anyHeaterOnTime > 0) {
       unsigned long timeDiff = currentTime - anyHeaterOnTime;
-      Serial.print(", OnTime=");
       if (timeDiff > currentTime) {
-        Serial.print("OVERFLOW!");
+        Serial.println("⚠️ Timer overflow detected - fixing");
         anyHeaterOnTime = currentTime; // Fix overflow
-      } else {
-        Serial.print(timeDiff / 1000);
-        Serial.print("s/");
-        Serial.print(MAX_HEATER_ON_TIME / 1000);
-        Serial.print("s");
       }
     }
     
-    Serial.print(", AnyOn=");
-    Serial.print(anyHeaterOn ? "YES" : "NO");
-    
-    // Check for NaN in heater power
+    // Check for NaN in heater power - only report if found
     if (isnan(heaterPower)) {
-      Serial.print(", POWER=NaN!");
+      Serial.println("⚠️ Power calculation NaN - resetting to 0");
       heaterPower = 0.0; // Fix NaN
     }
     
-    Serial.println();
+    lastSafetyCheck = millis();
   }
   
   // Handle safety timeout recovery and timing
