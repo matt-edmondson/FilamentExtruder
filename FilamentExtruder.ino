@@ -1,44 +1,84 @@
 #include <Arduino.h>
 #include <Wire.h>
+#include <SPI.h>
 #include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
+#include <Adafruit_SSD1351.h>
 #include <math.h>
 
+// ========================================
+// ARDUINO MEGA 2560 R3 PIN CONFIGURATION
+// ========================================
+
 // Board configuration
-#define VREF 5.0  // Arduino Uno uses 5V reference
+#define VREF 5.0  // Arduino Mega 2560 uses 5V reference
 #define ADC_BIT_DEPTH 10
 #define ADC_MAX_VALUE ((1 << ADC_BIT_DEPTH) - 1)
 
-// Thermistor constants
-#define THERMISTOR_PIN A0
+// ========================================
+// ANALOG INPUT PINS
+// ========================================
+
+// Temperature sensing
+#define THERMISTOR_PIN A0           // Analog pin for thermistor reading
 #define THERMISTOR_SERIES_RESISTOR 4660 // Measured 4.7k
-#define THERMISTOR_NOMINAL 100000 // 100k unmeasured
+#define THERMISTOR_NOMINAL 100000   // 100k unmeasured
 #define TEMPERATURE_NOMINAL 25
 #define B_COEFFICIENT 3950
 
-// Display configuration
+// User control potentiometers
+#define SPEED_POT_PIN A1            // Speed control potentiometer
+#define TEMP_POT_PIN A2             // Temperature control potentiometer
+
+// ========================================
+// DIGITAL I/O PINS
+// ========================================
+
+// I2C Communication (Hardware I2C on Mega)
+#define I2C_SDA_PIN 20              // Hardware SDA pin on Mega 2560
+#define I2C_SCL_PIN 21              // Hardware SCL pin on Mega 2560
+
+// SPI Communication (Hardware SPI on Mega)
+#define SPI_MOSI_PIN 51             // Hardware MOSI/SDA pin on Mega 2560
+#define SPI_SCK_PIN 52              // Hardware SCK/SCL pin on Mega 2560
+#define SPI_MISO_PIN 50             // Hardware MISO pin on Mega 2560 (not used for display)
+
+// SSD1351 Display Control Pins
+#define DISPLAY_CS_PIN 53           // Chip Select for SSD1351 display
+#define DISPLAY_DC_PIN 48           // Data/Command pin for SSD1351 display  
+#define DISPLAY_RST_PIN 49          // Reset pin for SSD1351 display
+
+// Heater control outputs (using PWM-capable pins for future flexibility)
+#define HEATER_1_PIN 2              // Primary heater control (PWM capable)
+#define HEATER_2_PIN 3              // Secondary heater control (PWM capable)
+#define HEATER_3_PIN 4              // Tertiary heater control (PWM capable)
+#define HEATER_4_PIN 5              // Quaternary heater control (PWM capable)
+#define NUM_HEATERS 2               // Number of connected heaters
+#define HEATER_OFF HIGH             // Relay OFF state (assuming active-low relays)
+#define HEATER_ON LOW               // Relay ON state
+
+// ========================================
+// DISPLAY CONFIGURATION
+// ========================================
 #define SCREEN_WIDTH 128
-#define SCREEN_HEIGHT 64
-#define OLED_RESET -1
-#define SCREEN_ADDRESS1 0x3C
-#define SCREEN_ADDRESS2 0x3D
+#define SCREEN_HEIGHT 128           // SSD1351 is 128x128
+// SSD1351 Color Definitions (16-bit RGB565)
+#define SSD1351_BLACK 0x0000
+#define SSD1351_BLUE 0x001F
+#define SSD1351_RED 0xF800
+#define SSD1351_GREEN 0x07E0
+#define SSD1351_CYAN 0x07FF
+#define SSD1351_MAGENTA 0xF81F
+#define SSD1351_YELLOW 0xFFE0  
+#define SSD1351_WHITE 0xFFFF
+// Legacy I2C addresses (kept for potential fallback)
+#define I2C_SCREEN_ADDRESS1 0x3C
+#define I2C_SCREEN_ADDRESS2 0x3D
 
-// Analog potentiometer pins
-#define POT1_PIN A1
-#define POT2_PIN A2
-
-// Stepper motor settings
+// ========================================
+// MOTOR CONTROL SETTINGS
+// ========================================
 #define TORQUE 1000
-#define MAX_SPEED 1000
-
-// Heater control pins (Arduino Uno compatible digital pins)
-#define HEATER_1_PIN D2
-#define HEATER_2_PIN D3
-#define HEATER_3_PIN D4
-#define HEATER_4_PIN D5
-#define NUM_HEATERS 2
-#define HEATER_OFF HIGH
-#define HEATER_ON LOW
+#define MAX_SPEED_RPM 1000
 
 // Temperature control settings
 #define MIN_TARGET_TEMP 10         // Minimum target temperature to enable heaters (prevents accidental heating)
@@ -64,9 +104,8 @@ float lastTemperatureError = 0;
 float heaterPower = 0; // 0.0 to 1.0
 unsigned long lastTempUpdate = 0;
 
-// Create display object (Arduino Uno uses standard I2C pins A4/A5)
-int displayAddress = SCREEN_ADDRESS1;
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+// Create SSD1351 display object using SPI
+Adafruit_SSD1351 display = Adafruit_SSD1351(SCREEN_WIDTH, SCREEN_HEIGHT, &SPI, DISPLAY_CS_PIN, DISPLAY_DC_PIN, DISPLAY_RST_PIN);
 
 // Variables to store potentiometer values
 uint16_t pot1Value = 0;
@@ -103,25 +142,19 @@ void setup() {
     delay(100);  // Small delay to prevent tight loop
   }
   
-  Serial.println("Arduino Uno R3 Filament Extruder Controller Starting...");
+  Serial.println("Arduino Mega 2560 R3 Filament Extruder Controller Starting...");
   
-  // Arduino Uno has fixed 10-bit ADC - no analogReadResolution() needed
+  // Arduino Mega 2560 has fixed 10-bit ADC - no analogReadResolution() needed
   delay(100); // Wait for ADC to settle
   (void)analogRead(THERMISTOR_PIN); // Throw away first reading
  
-  // Initialize I2C (Arduino Uno uses fixed pins A4/A5)
-  initializeI2C();
-  
-  // Scan for I2C devices
-  scanI2CDevices();
+  // Initialize SPI for display communication
+  SPI.begin();
+  Serial.println("SPI initialized for display communication");
   
   // Initialize display
   if (!initializeDisplay()) {
-    Serial.println("Display initialization failed - trying alternate address");
-    displayAddress = SCREEN_ADDRESS2;
-    if (!initializeDisplay()) {
-      Serial.println("Display initialization failed - continuing without display");
-    }
+    Serial.println("SSD1351 display initialization failed - continuing without display");
   }
   
   // Initialize heater control pins
@@ -129,11 +162,11 @@ void setup() {
   
   // Test analog potentiometer reading
   Serial.println("Reading analog potentiometers...");
-  pot1Value = readAnalogPot(POT1_PIN);
-  pot2Value = readAnalogPot(POT2_PIN);
-  Serial.print("Pot1 (A1): ");
+  pot1Value = readAnalogPot(SPEED_POT_PIN);
+  pot2Value = readAnalogPot(TEMP_POT_PIN);
+  Serial.print("Speed Pot (A1): ");
   Serial.print(pot1Value);
-  Serial.print(", Pot2 (A2): ");
+  Serial.print(", Temp Pot (A2): ");
   Serial.println(pot2Value);
   
   // Ensure clean start - reset any safety timeouts
@@ -153,12 +186,12 @@ void setup() {
 
 void loop() {
   // Read analog potentiometer values
-  pot1Value = readAnalogPot(POT1_PIN);
-  pot2Value = readAnalogPot(POT2_PIN);
+  pot1Value = readAnalogPot(SPEED_POT_PIN);
+  pot2Value = readAnalogPot(TEMP_POT_PIN);
 
   // Map potentiometer values to control ranges with calibration
   // Option: Add dead zones if pots don't reach full 0-1023 range
-  targetSpeed = map(constrain(pot1Value, 10, ADC_MAX_VALUE - 10), 10, ADC_MAX_VALUE - 10, 0, MAX_SPEED);
+  targetSpeed = map(constrain(pot1Value, 10, ADC_MAX_VALUE - 10), 10, ADC_MAX_VALUE - 10, 0, MAX_SPEED_RPM);
   targetTemperature = map(constrain(pot2Value, 10, ADC_MAX_VALUE - 10), 10, ADC_MAX_VALUE - 10, 0, MAX_TARGET_TEMP);
 
   currentTemperature = readTemperature();
@@ -235,46 +268,53 @@ void loop() {
 }
 
 void initializeI2C() {
-  // Arduino Uno uses fixed I2C pins (A4=SDA, A5=SCL)
-  // No need to set custom pins like on Pico W
+  // Arduino Mega 2560 uses hardware I2C pins (20=SDA, 21=SCL)
+  // No need to set custom pins - these are the hardware I2C pins
   Wire.begin();
   
-  Serial.println("I2C initialized on default pins (A4=SDA, A5=SCL)");
+  Serial.print("I2C initialized on hardware pins (");
+  Serial.print(I2C_SDA_PIN);
+  Serial.print("=SDA, ");
+  Serial.print(I2C_SCL_PIN);
+  Serial.println("=SCL)");
 }
 
 bool initializeDisplay() {
-  // Test display I2C connection first
-  Serial.print("Testing display at address 0x");
-  Serial.print(displayAddress, HEX);
-  Serial.print("... ");
+  // Initialize SSD1351 color OLED display
+  Serial.println("Initializing SSD1351 128x128 color display via SPI...");
   
-  Wire.beginTransmission(displayAddress);
-  uint8_t error = Wire.endTransmission();
-  if (error == 0) {
-    Serial.println("Display responds to I2C");
-  } else {
-    Serial.print("Display I2C error: ");
-    Serial.println(error);
-    return false;
-  }
+  // Configure display control pins
+  pinMode(DISPLAY_CS_PIN, OUTPUT);
+  pinMode(DISPLAY_DC_PIN, OUTPUT);
+  pinMode(DISPLAY_RST_PIN, OUTPUT);
   
-  // Initialize SSD1306 display
-  if(!display.begin(SSD1306_SWITCHCAPVCC, displayAddress)) {
-    Serial.println("SSD1306 allocation failed");
-    return false; // Return failure instead of hanging
-  }
+  // Initialize the SSD1351 display
+  display.begin();
   
-  display.clearDisplay();
+  Serial.println("SSD1351 display initialized successfully");
+  
+  // Clear display and show startup screen
+  display.fillScreen(SSD1351_BLACK);
   display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-  display.setCursor(0, 0);
-  display.println("Arduino Uno R3");
+  display.setTextColor(SSD1351_WHITE);
+  display.setCursor(5, 10);
+  display.println("Arduino Mega 2560");
+  display.setCursor(10, 25);
+  display.setTextColor(SSD1351_CYAN);
   display.println("Filament Extruder");
+  display.setCursor(20, 45);
+  display.setTextColor(SSD1351_YELLOW);
+  display.println("128x128 Color");
+  display.setCursor(25, 60);
+  display.setTextColor(SSD1351_GREEN);
   display.println("Initializing...");
-  display.display();
+  
+  // Draw a colored border
+  display.drawRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, SSD1351_WHITE);
+  display.drawRect(1, 1, SCREEN_WIDTH-2, SCREEN_HEIGHT-2, SSD1351_BLUE);
+  
   delay(2000);
   
-  Serial.println("Display initialized successfully");
   return true;
 }
 
@@ -298,9 +338,9 @@ uint16_t readAnalogPot(int pin) {
   const float smoothingFactor = 0.15; // 0.05 = very smooth, 0.3 = more responsive
   
   float* currentFilter;
-  if (pin == POT1_PIN) {
+  if (pin == SPEED_POT_PIN) {
     currentFilter = &filteredPot1;
-  } else if (pin == POT2_PIN) {
+  } else if (pin == TEMP_POT_PIN) {
     currentFilter = &filteredPot2;
   } else {
     return rawReading; // Unknown pin, return raw reading
@@ -314,7 +354,7 @@ uint16_t readAnalogPot(int pin) {
   static uint16_t lastPot2Output = 0;
   
   uint16_t* lastOutput;
-  if (pin == POT1_PIN) {
+  if (pin == SPEED_POT_PIN) {
     lastOutput = &lastPot1Output;
   } else {
     lastOutput = &lastPot2Output;
@@ -332,62 +372,126 @@ uint16_t readAnalogPot(int pin) {
 }
 
 void updateDisplay() {
-  display.clearDisplay();
+  // Clear display with black background
+  display.fillScreen(SSD1351_BLACK);
   
-  // Title
+  // Draw colored border
+  display.drawRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, SSD1351_BLUE);
+  
+  // Title and status section
   display.setTextSize(1);
-  display.setCursor(0, 0);
-
-  // Safety status
+  display.setCursor(5, 5);
+  display.setTextColor(SSD1351_WHITE);
+  display.print("Filament Extruder");
+  
+  // Safety status with color coding
+  display.setCursor(5, 18);
   if (currentTemperature > SAFETY_MAX_TEMP - 20) {
-    display.println("! TOO HOT !");
+    display.setTextColor(SSD1351_RED);
+    display.print("! OVERHEATING !");
   } else if (!heatersEnabled) {
-    display.println("Standby");
+    display.setTextColor(SSD1351_YELLOW);
+    display.print("STANDBY");
   } else {
-    display.println("Running");
+    display.setTextColor(SSD1351_GREEN);
+    display.print("RUNNING");
   }
   
-  // Draw line separator
-  display.drawLine(0, 10, SCREEN_WIDTH-1, 10, SSD1306_WHITE);
+  // Draw horizontal separator
+  display.drawLine(5, 32, SCREEN_WIDTH-5, 32, SSD1351_CYAN);
   
-  // Speed control
-  display.setCursor(0, 14);
-  display.setTextSize(1);
-  display.print("Speed Set: ");
+  // Speed control section
+  display.setCursor(5, 38);
+  display.setTextColor(SSD1351_WHITE);
+  display.print("Speed: ");
+  display.setTextColor(SSD1351_CYAN);
   display.print(targetSpeed);
+  display.setTextColor(SSD1351_WHITE);
   display.print(" RPM");
   
-  // Temperature info
-  display.setCursor(0, 24);
-  display.print("Temp Targ: ");
+  // Temperature target
+  display.setCursor(5, 50);
+  display.setTextColor(SSD1351_WHITE);
+  display.print("Target: ");
+  display.setTextColor(SSD1351_YELLOW);
   display.print(targetTemperature);
+  display.setTextColor(SSD1351_WHITE);
   display.print("C");
   
-  display.setCursor(0, 34);
-  display.print("Temp Curr: ");
+  // Current temperature
+  display.setCursor(5, 62);
+  display.setTextColor(SSD1351_WHITE);
+  display.print("Current: ");
+  // Color code temperature based on proximity to target
+  float tempDiff = abs(currentTemperature - targetTemperature);
+  if (tempDiff < 5) {
+    display.setTextColor(SSD1351_GREEN);  // Close to target
+  } else if (tempDiff < 15) {
+    display.setTextColor(SSD1351_YELLOW); // Moderately close
+  } else {
+    display.setTextColor(SSD1351_RED);    // Far from target
+  }
   display.print(currentTemperature, 1);
+  display.setTextColor(SSD1351_WHITE);
   display.print("C");
   
-  // Temperature progress bar
-  int tempBarWidth = map(constrain(currentTemperature, 0, targetTemperature), 0, targetTemperature, 0, SCREEN_WIDTH-20);
-  display.drawRect(10, 44, SCREEN_WIDTH-20, 4, SSD1306_WHITE);
-  if (tempBarWidth > 0) {
-    display.fillRect(10, 44, tempBarWidth, 4, SSD1306_WHITE);
+  // Enhanced temperature progress bar
+  int barY = 78;
+  int barHeight = 8;
+  int barWidth = SCREEN_WIDTH - 20;
+  int tempBarFill = 0;
+  if (targetTemperature > 0) {
+    tempBarFill = map(constrain(currentTemperature, 0, targetTemperature), 0, targetTemperature, 0, barWidth);
   }
   
-  // Heater status indicators
-  display.setCursor(0, 52);
-  display.print("Heat: ");
-  for (int i = 0; i < 4; i++) {
-    display.print(heaterState[i] ? "1" : "0");
+  // Draw temperature bar background
+  display.drawRect(10, barY, barWidth, barHeight, SSD1351_WHITE);
+  display.fillRect(11, barY+1, barWidth-2, barHeight-2, SSD1351_BLACK);
+  
+  // Fill temperature bar with gradient effect
+  if (tempBarFill > 0) {
+    // Create color gradient from blue (cold) to red (hot)
+    for (int x = 0; x < tempBarFill-2; x++) {
+      uint16_t barColor;
+      if (x < tempBarFill/3) {
+        barColor = SSD1351_BLUE;
+      } else if (x < (2*tempBarFill)/3) {
+        barColor = SSD1351_YELLOW;
+      } else {
+        barColor = SSD1351_RED;
+      }
+      display.drawLine(11+x, barY+1, 11+x, barY+barHeight-2, barColor);
+    }
   }
   
-  // Power indicator
-  display.print(" ");
+  // Heater status section with color coding
+  display.setCursor(5, 92);
+  display.setTextColor(SSD1351_WHITE);
+  display.print("Heaters: ");
+  for (int i = 0; i < NUM_HEATERS; i++) {
+    display.setTextColor(heaterState[i] ? SSD1351_RED : SSD1351_GREEN);
+    display.print(heaterState[i] ? "ON " : "OFF");
+    if (i < NUM_HEATERS - 1) display.print(" ");
+  }
+  
+  // Power indicator with visual bar
+  display.setCursor(5, 104);
+  display.setTextColor(SSD1351_WHITE);
+  display.print("Power: ");
+  display.setTextColor(SSD1351_MAGENTA);
   display.print((int)(heaterPower * 100));
+  display.setTextColor(SSD1351_WHITE);
   display.print("%");
-
-  display.display();
+  
+  // Power level bar
+  int powerBarWidth = map(heaterPower * 100, 0, 100, 0, 60);
+  display.drawRect(5, 116, 62, 6, SSD1351_WHITE);
+  display.fillRect(6, 117, 60, 4, SSD1351_BLACK);
+  if (powerBarWidth > 0) {
+    uint16_t powerColor = (heaterPower > 0.7) ? SSD1351_RED : 
+                         (heaterPower > 0.4) ? SSD1351_YELLOW : SSD1351_GREEN;
+    display.fillRect(6, 117, powerBarWidth, 4, powerColor);
+  }
 }
 
 void scanI2CDevices() {
@@ -428,6 +532,11 @@ void scanI2CDevices() {
     Serial.print("/");
     Serial.print(SCREEN_ADDRESS2, HEX);
     Serial.println(": SSD1306 Display");
+    Serial.print("  - ");
+    Serial.print(I2C_SDA_PIN);
+    Serial.print("/");
+    Serial.print(I2C_SCL_PIN);
+    Serial.println(": I2C (SDA/SCL)");
     Serial.println("  - A1/A2: Analog potentiometers");  
   } else {
     Serial.print("Found ");
@@ -541,7 +650,7 @@ void initializeHeaters() {
   Serial.print(SAFETY_MAX_TEMP);
   Serial.println("°C");
   Serial.println("Thermistor sampling: 1Hz (prevents self-heating)");
-  Serial.println("Using Arduino Uno 5V reference for thermistor and ADC");
+  Serial.println("Using Arduino Mega 2560 5V reference for thermistor and ADC");
 }
 
 void updateTemperatureControl() {
