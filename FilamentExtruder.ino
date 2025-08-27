@@ -29,6 +29,15 @@
 #define SPEED_POT_PIN A1            // Speed control potentiometer
 #define TEMP_POT_PIN A2             // Temperature control potentiometer
 
+// Analog input filtering settings (per input customization)
+#define SPEED_POT_SMOOTHING_FACTOR 0.5    // Speed pot: 0.5 = responsive (UI feedback)
+                                          // Range: 0.1 = very smooth, 0.7 = very responsive
+#define SPEED_POT_DEADBAND 1              // Speed pot deadband: 1 ADC count (responsive)
+
+#define TEMP_POT_SMOOTHING_FACTOR 0.3     // Temp pot: 0.3 = smoother (temperature stability)  
+                                          // Range: 0.1 = very smooth, 0.7 = very responsive
+#define TEMP_POT_DEADBAND 2               // Temp pot deadband: 2 ADC counts (stable)
+
 // ========================================
 // DIGITAL I/O PINS
 // ========================================
@@ -337,14 +346,16 @@ uint16_t readAnalogPot(int pin) {
     initialized = true;
   }
   
-  // Exponential moving average filter (adjustable smoothing) - optimized for UI responsiveness
-  const float smoothingFactor = 0.4; // 0.05 = very smooth, 0.3 = more responsive, 0.4 = UI responsive
-  
+  // Get per-input smoothing parameters and filter reference
   float* currentFilter;
+  float smoothingFactor;
+  
   if (pin == SPEED_POT_PIN) {
     currentFilter = &filteredPot1;
+    smoothingFactor = SPEED_POT_SMOOTHING_FACTOR;
   } else if (pin == TEMP_POT_PIN) {
     currentFilter = &filteredPot2;
+    smoothingFactor = TEMP_POT_SMOOTHING_FACTOR;
   } else {
     return rawReading; // Unknown pin, return raw reading
   }
@@ -356,17 +367,21 @@ uint16_t readAnalogPot(int pin) {
   static uint16_t lastPot1Output = 0;
   static uint16_t lastPot2Output = 0;
   
+  // Get per-input deadband and last output reference
   uint16_t* lastOutput;
+  uint16_t deadband;
+  
   if (pin == SPEED_POT_PIN) {
     lastOutput = &lastPot1Output;
+    deadband = SPEED_POT_DEADBAND;
   } else {
     lastOutput = &lastPot2Output;
+    deadband = TEMP_POT_DEADBAND;
   }
   
   uint16_t smoothedReading = (uint16_t)(*currentFilter + 0.5); // Round to nearest integer
   
-  // Deadband: only update output if change is significant (reduces jitter) - reduced for UI responsiveness  
-  const uint16_t deadband = 1; // Ignore changes smaller than this (reduced from 3 for faster response)
+  // Apply per-input deadband filter to eliminate jitter
   if (abs(smoothedReading - *lastOutput) > deadband) {
     *lastOutput = smoothedReading;
   }
