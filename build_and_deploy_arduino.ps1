@@ -7,8 +7,8 @@ Param(
   [switch]$NoMonitor,
   [string]$CliPath,
   [string]$Fqbn,
-  [ValidateSet('PicoW', 'Uno', 'Custom')]
-  [string]$Board = 'PicoW',
+  [ValidateSet('PicoW', 'Uno', 'Mega', 'Custom')]
+  [string]$Board = 'Mega',
   [string]$OutputDir = '.\\build',
   [string]$Sketch
 )
@@ -94,6 +94,15 @@ function Get-BoardConfiguration([string]$Board, [string]$CustomFqbn) {
                 Description = 'Arduino Uno R3'
             }
         }
+        'Mega' {
+            return @{
+                Fqbn = 'arduino:avr:mega:cpu=atmega2560'
+                PackageUrl = $null  # Arduino AVR core is built-in
+                Core = 'arduino:avr'
+                PreferredSketch = 'FilamentExtruder.ino'
+                Description = 'Arduino Mega 2560 R3'
+            }
+        }
         'Custom' {
             if (-not $CustomFqbn) {
                 throw 'Custom FQBN must be provided when using Custom board type'
@@ -138,6 +147,7 @@ function Install-RequiredComponents([string]$CliPath, [hashtable]$BoardConfig) {
 
     $requiredLibraries = @(
         'Adafruit SSD1306',
+        'Adafruit SSD1351 library',
         'Adafruit GFX Library',
         'Adafruit BusIO'
     )
