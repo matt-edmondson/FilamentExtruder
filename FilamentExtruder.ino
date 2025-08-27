@@ -30,13 +30,13 @@
 #define TEMP_POT_PIN A2             // Temperature control potentiometer
 
 // Analog input filtering settings (per input customization)
-#define SPEED_POT_SMOOTHING_FACTOR 0.5    // Speed pot: 0.5 = responsive (UI feedback)
+#define SPEED_POT_SMOOTHING_FACTOR 0.2    // Speed pot: 0.5 = responsive (UI feedback)
                                           // Range: 0.1 = very smooth, 0.7 = very responsive
-#define SPEED_POT_DEADBAND 1              // Speed pot deadband: 1 ADC count (responsive)
+#define SPEED_POT_DEADBAND 3              // Speed pot deadband: 1 ADC count (responsive)
 
-#define TEMP_POT_SMOOTHING_FACTOR 0.3     // Temp pot: 0.3 = smoother (temperature stability)  
+#define TEMP_POT_SMOOTHING_FACTOR 0.2     // Temp pot: 0.3 = smoother (temperature stability)  
                                           // Range: 0.1 = very smooth, 0.7 = very responsive
-#define TEMP_POT_DEADBAND 2               // Temp pot deadband: 2 ADC counts (stable)
+#define TEMP_POT_DEADBAND 3               // Temp pot deadband: 2 ADC counts (stable)
 
 // ========================================
 // DIGITAL I/O PINS
@@ -661,9 +661,24 @@ float readTemperature() {
     // Read raw ADC value
     int rawADC = analogRead(THERMISTOR_PIN);
     
-    // Initialize filters on first call
+    // Initialize filters on first call with actual temperature reading
     if (!tempInitialized) {
       filteredADC = rawADC;
+      
+      // Calculate actual temperature from first reading to avoid 0°C startup
+      float voltage = rawADC * (VREF / (float)ADC_MAX_VALUE);
+      float resistance = THERMISTOR_SERIES_RESISTOR * voltage / (VREF - voltage);
+      float steinhart = resistance / THERMISTOR_NOMINAL;
+      steinhart = log(steinhart);
+      steinhart /= B_COEFFICIENT;
+      steinhart += 1.0 / (TEMPERATURE_NOMINAL + 273.15);
+      steinhart = 1.0 / steinhart;
+      steinhart -= 273.15;
+      
+      // Initialize temperature filter with actual reading instead of 0
+      filteredTemperature = steinhart;
+      lastTempOutput = steinhart;
+      
       tempInitialized = true;
       lastSampleTime = currentTime;
     }
