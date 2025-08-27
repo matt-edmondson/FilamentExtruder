@@ -30,13 +30,13 @@
 #define TEMP_POT_PIN A2             // Temperature control potentiometer
 
 // Analog input filtering settings (per input customization)
-#define SPEED_POT_SMOOTHING_FACTOR 0.2    // Speed pot: 0.5 = responsive (UI feedback)
+#define SPEED_POT_SMOOTHING_FACTOR 0.15   // Speed pot: 0.15 = smoother (reduces noise)
                                           // Range: 0.1 = very smooth, 0.7 = very responsive
-#define SPEED_POT_DEADBAND 3              // Speed pot deadband: 1 ADC count (responsive)
+#define SPEED_POT_DEADBAND 5              // Speed pot deadband: 5 ADC counts (eliminates 1-4 RPM noise)
 
-#define TEMP_POT_SMOOTHING_FACTOR 0.2     // Temp pot: 0.3 = smoother (temperature stability)  
+#define TEMP_POT_SMOOTHING_FACTOR 0.1     // Temp pot: 0.1 = very smooth (temperature stability)  
                                           // Range: 0.1 = very smooth, 0.7 = very responsive
-#define TEMP_POT_DEADBAND 3               // Temp pot deadband: 2 ADC counts (stable)
+#define TEMP_POT_DEADBAND 6               // Temp pot deadband: 6 ADC counts (eliminates 1°C oscillation)
 
 // ========================================
 // DIGITAL I/O PINS
@@ -404,11 +404,11 @@ void updateDisplay() {
   unsigned long currentTime = millis();
   bool forceFullRefresh = !displayInitialized || (currentTime - lastFullRefresh > DISPLAY_FULL_REFRESH_INTERVAL_MS);
   
-  // Check if any values have changed significantly (reduced thresholds for UI responsiveness)
-  bool speedChanged = (abs(targetSpeed - lastTargetSpeed) > 2);        // Reduced from 5 to 2 RPM
-  bool targetTempChanged = (abs(targetTemperature - lastTargetTemp) > 0.5);  // Reduced from 1 to 0.5°C
-  bool currentTempChanged = (abs(currentTemperature - lastCurrentTemp) > 0.3); // Reduced from 0.5 to 0.3°C
-  bool powerChanged = (abs(heaterPower - lastHeaterPower) > 0.01);     // Reduced from 0.02 to 0.01 (1% vs 2%)
+  // Check if any values have changed significantly (increased thresholds to reduce noise-based updates)
+  bool speedChanged = (abs(targetSpeed - lastTargetSpeed) > 5);        // Increased to 5 RPM to ignore noise
+  bool targetTempChanged = (abs(targetTemperature - lastTargetTemp) > 2);  // Increased to 2°C to ignore noise
+  bool currentTempChanged = (abs(currentTemperature - lastCurrentTemp) > 0.5); // Keep at 0.5°C for actual temp changes
+  bool powerChanged = (abs(heaterPower - lastHeaterPower) > 0.03);     // Increased to 3% to ignore small power changes
   bool heatersEnabledChanged = (heatersEnabled != lastHeatersEnabled);
   
   bool heaterStateChanged = false;
