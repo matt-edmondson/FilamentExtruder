@@ -57,14 +57,12 @@
 #define DISPLAY_DC_PIN 48           // Data/Command pin for SSD1351 display  
 #define DISPLAY_RST_PIN 49          // Reset pin for SSD1351 display
 
-// Heater control outputs (using PWM-capable pins for future flexibility)
-#define HEATER_1_PIN 2              // Primary heater control (PWM capable)
-#define HEATER_2_PIN 3              // Secondary heater control (PWM capable)
-#define HEATER_3_PIN 4              // Tertiary heater control (PWM capable)
-#define HEATER_4_PIN 5              // Quaternary heater control (PWM capable)
+// Heater control outputs (PWM pins for MOSFET control)
+#define HEATER_1_PIN 2              // Primary heater control (Timer 3B - 30Hz PWM)
+#define HEATER_2_PIN 3              // Secondary heater control (Timer 3C - 30Hz PWM)
+#define HEATER_3_PIN 4              // Tertiary heater control (Timer 0B - default PWM)
+#define HEATER_4_PIN 5              // Quaternary heater control (Timer 3A - 30Hz PWM)
 #define NUM_HEATERS 2               // Number of connected heaters
-#define HEATER_OFF LOW             // Relay OFF state (assuming active-low relays)
-#define HEATER_ON HIGH               // Relay ON state
 
 // ========================================
 // DISPLAY CONFIGURATION
@@ -102,7 +100,8 @@
 #define MIN_TARGET_TEMP 10         // Minimum target temperature to enable heaters (prevents accidental heating)
 #define MAX_TARGET_TEMP 300
 #define TEMP_TOLERANCE 2           // Temperature tolerance in degrees
-#define HEATER_PULSE_INTERVAL 1000 // Pulse interval in milliseconds
+#define HEATER_PWM_FREQUENCY_HZ 30 // PWM frequency for MOSFET control (configurable)
+#define HEATER_PWM_PERIOD_MS (1000 / HEATER_PWM_FREQUENCY_HZ) // Calculate period from frequency
 #define MAX_HEATER_ON_TIME 30000   // Maximum continuous heater on time (30 seconds)
 #define SAFETY_MAX_TEMP 350        // Safety shutdown temperature
 #define MAX_DUTY_CYCLE 0.95        // Maximum heater duty cycle (95% - prevents 100% on time)
@@ -117,12 +116,17 @@ float temperatureDifference = 0;    // Temp1 - Temp2 differential
 bool heatersEnabled = false;
 unsigned long lastHeaterUpdate = 0;
 unsigned long heaterOnTime = 0;
-bool heaterState[4] = {false, false, false, false};  // Support up to 4, use NUM_HEATERS
+// Independent heater control variables
+int heaterTargetTemp[4] = {0, 0, 0, 0};           // Individual target temps for each heater
+float heaterDutyCycle[4] = {0.0, 0.0, 0.0, 0.0}; // PWM duty cycle (0.0-1.0) for each heater
+bool heaterState[4] = {false, false, false, false}; // On/off state for each heater
+float heaterTemperatureError[4] = {0, 0, 0, 0};   // Temperature error for each heater
+unsigned long heaterLastUpdate[4] = {0, 0, 0, 0}; // Last update time for each heater
 
-// PID-like control variables
-float temperatureError = 0;
-float lastTemperatureError = 0;
-float heaterPower = 0; // 0.0 to 1.0
+// Legacy compatibility variables
+float temperatureError = 0;         // Primary heater error (for compatibility)
+float lastTemperatureError = 0;     // Legacy
+float heaterPower = 0;             // Average power across all heaters (for display)
 unsigned long lastTempUpdate = 0;
 
 // Create SSD1351 display object using SPI
@@ -136,6 +140,7 @@ uint16_t pot2Value = 0;
 void initializeI2C();
 bool initializeDisplay();
 void initializeHeaters();
+void configurePWMFrequency();
 uint16_t readAnalogPot(int pin);
 float readTemperature(int thermistorPin);
 void updateTemperatureReadings();
@@ -143,11 +148,13 @@ void updateDisplay();
 void scanI2CDevices();
 void updateHeaterControl();
 void setHeaterState(int heaterIndex, bool state);
+void setHeaterPWM(int heaterIndex, float dutyCycle);
+void updateIndependentHeaterControl();
+float getHeaterTemperature(int heaterIndex);
 void emergencyShutdown();
 void resetEmergencyWarning();
 void resetSafetyTimeout();
 float calculateHeaterPower(float targetTemp, float currentTemp);
-void updateTemperatureControl();
 
 void setup() {
   Serial.begin(115200);
@@ -183,6 +190,9 @@ void setup() {
   // Initialize heater control pins
   initializeHeaters();
   
+  // Configure PWM frequency for MOSFET control
+  configurePWMFrequency();
+  
   // Test analog potentiometer reading
   Serial.println("Reading analog potentiometers...");
   pot1Value = readAnalogPot(SPEED_POT_PIN);
@@ -200,7 +210,9 @@ void setup() {
   Serial.print(HEATER_1_PIN);
   Serial.print("-");
   Serial.print(HEATER_1_PIN + NUM_HEATERS - 1);
-  Serial.println(" configured for relay control");
+  Serial.print(" configured for MOSFET PWM control @ ");
+  Serial.print(HEATER_PWM_FREQUENCY_HZ);
+  Serial.println("Hz");
   Serial.print("Target temperature: ");
   Serial.print(targetTemperature);
   Serial.println("°C");
@@ -220,11 +232,13 @@ void loop() {
   // Update both temperature readings
   updateTemperatureReadings();
   
-  // Update temperature control system
-  updateTemperatureControl();
+  // Apply global target temperature to individual heaters
+  for (int i = 0; i < NUM_HEATERS; i++) {
+    heaterTargetTemp[i] = targetTemperature;
+  }
   
-  // Update heater control based on temperature
-  updateHeaterControl();
+  // Update independent heater control based on their respective thermistors
+  updateIndependentHeaterControl();
 
   // Update display at configurable rate (reduces CPU load and SPI traffic)
   static unsigned long lastDisplayUpdate = 0;
@@ -240,6 +254,7 @@ void loop() {
   static float lastDebugCurrentTemp = -999;
   static float lastDebugHeaterPower = -1;
   static bool lastDebugHeaterStates[4] = {false, false, false, false};
+  static float lastDebugDutyCycles[4] = {-1, -1, -1, -1};
   
   // Check if any significant values have changed
   bool valuesChanged = false;
@@ -248,9 +263,13 @@ void loop() {
   if (fabs(currentTemperature - lastDebugCurrentTemp) > 1.0) valuesChanged = true; // Temp reading change > 1°C
   if (fabs(heaterPower - lastDebugHeaterPower) > 0.05) valuesChanged = true;        // Power change > 5%
   
-      // Check if heater states changed
+      // Check if heater states or duty cycles changed
     for (int i = 0; i < NUM_HEATERS; i++) {
       if (heaterState[i] != lastDebugHeaterStates[i]) {
+        valuesChanged = true;
+        break;
+      }
+      if (fabs(heaterDutyCycle[i] - lastDebugDutyCycles[i]) > 0.05) { // 5% duty cycle change
         valuesChanged = true;
         break;
       }
@@ -284,6 +303,7 @@ void loop() {
     lastDebugHeaterPower = heaterPower;
     for (int i = 0; i < NUM_HEATERS; i++) {
       lastDebugHeaterStates[i] = heaterState[i];
+      lastDebugDutyCycles[i] = heaterDutyCycle[i];
     }
     
     lastDebug = millis();
@@ -652,6 +672,38 @@ void updateDisplay() {
     }
   }
   
+  // Individual heater duty cycle bars (visual representation)
+  if (powerChanged || heaterStateChanged || forceFullRefresh) {
+    int barY = 105; // Position below power text
+    int barWidth = 25; // Width per heater bar
+    int barHeight = 3; // Small bars
+    int barSpacing = 30; // Space between bars
+    
+    for (int i = 0; i < NUM_HEATERS; i++) {
+      int barX = 75 + (i * barSpacing);
+      
+      // Clear individual bar area
+      display.fillRect(barX, barY, barWidth, barHeight, SSD1351_BLACK);
+      
+      // Draw bar outline
+      display.drawRect(barX, barY, barWidth, barHeight, SSD1351_WHITE);
+      
+      // Fill bar based on duty cycle
+      int fillWidth = map(heaterDutyCycle[i] * 100, 0, 100, 0, barWidth - 2);
+      if (fillWidth > 0) {
+        uint16_t barColor;
+        if (heaterDutyCycle[i] < 0.33) {
+          barColor = SSD1351_GREEN;
+        } else if (heaterDutyCycle[i] < 0.67) {
+          barColor = SSD1351_YELLOW;
+        } else {
+          barColor = SSD1351_RED;
+        }
+        display.fillRect(barX + 1, barY + 1, fillWidth, barHeight - 2, barColor);
+      }
+    }
+  }
+  
   // Update last known values
   lastTargetSpeed = targetSpeed;
   lastTargetTemp = targetTemperature;
@@ -865,50 +917,6 @@ void initializeHeaters() {
   Serial.println("Using Arduino Mega 2560 5V reference for thermistor and ADC");
 }
 
-void updateTemperatureControl() {
-  // Calculate temperature error
-  temperatureError = targetTemperature - currentTemperature;
-  
-  // Safety check - emergency shutdown if temperature too high
-  if (currentTemperature > SAFETY_MAX_TEMP) {
-    emergencyShutdown();
-    return;
-  } else {
-    // Reset emergency warning when temperature is back to safe levels (with hysteresis)
-    static bool wasInEmergency = false;
-    if (wasInEmergency && currentTemperature < SAFETY_MAX_TEMP - 10) { // 10°C hysteresis
-      resetEmergencyWarning();
-      wasInEmergency = false;
-      Serial.println("Temperature returned to safe levels - emergency reset");
-    }
-    if (currentTemperature > SAFETY_MAX_TEMP - 5) { // Set flag when approaching danger
-      wasInEmergency = true;
-    }
-  }
-  
-  // Enable heaters only if target temperature is reasonable
-  static bool lastHeatersEnabled = false;
-  if (targetTemperature > MIN_TARGET_TEMP && targetTemperature < SAFETY_MAX_TEMP) {
-    heatersEnabled = true;
-  } else {
-    heatersEnabled = false;
-  }
-  
-  // Debug heaters enabled/disabled changes
-  if (heatersEnabled != lastHeatersEnabled) {
-    Serial.print("Heaters ");
-    Serial.print(heatersEnabled ? "ENABLED" : "DISABLED");
-    Serial.print(" - Target temp: ");
-    Serial.print(targetTemperature);
-    Serial.println("°C");
-    lastHeatersEnabled = heatersEnabled;
-  }
-  
-  // Calculate required heater power using simple proportional control
-  heaterPower = calculateHeaterPower(targetTemperature, currentTemperature);
-  
-  lastTempUpdate = millis();
-}
 
 float calculateHeaterPower(float targetTemp, float currentTemp) {
   // Check for NaN inputs
@@ -959,15 +967,7 @@ void updateHeaterControl() {
   static bool lastSafetyWarning = false;
   bool hasWarnings = (currentTemperature > SAFETY_MAX_TEMP - 30) || !heatersEnabled;
   
-  if (hasWarnings || (millis() - lastHeaterDebug > 60000)) { // Debug every 60 seconds or when warnings
-    if (hasWarnings) {
-      Serial.print("⚠️ HEATER: ");
-      if (currentTemperature > SAFETY_MAX_TEMP - 30) Serial.print("HIGH TEMP ");
-      if (!heatersEnabled) Serial.print("DISABLED ");
-      Serial.print("- ");
-    } else {
-      Serial.print("Heater Status: ");
-    }
+  if (millis() - lastHeaterDebug > 60000) {
     Serial.print("T1:");
     Serial.print(currentTemperature1, 1);
     Serial.print("°C T2:");
@@ -1123,20 +1123,135 @@ void updateHeaterControl() {
   lastHeaterUpdate = currentTime;
 }
 
-void setHeaterState(int heaterIndex, bool state) {
+// Independent heater control - each heater controlled by its own thermistor
+void updateIndependentHeaterControl() {
+  unsigned long currentTime = millis();
+  
+  // Safety check - emergency shutdown if any temperature too high
+  for (int i = 0; i < NUM_HEATERS; i++) {
+    float heaterTemp = getHeaterTemperature(i);
+    if (heaterTemp > SAFETY_MAX_TEMP) {
+      emergencyShutdown();
+      return;
+    }
+  }
+  
+  // Calculate average heater power for compatibility/display
+  float totalPower = 0.0;
+  int activeHeaters = 0;
+  
+  // Process each heater independently
+  for (int i = 0; i < NUM_HEATERS; i++) {
+    float currentTemp = getHeaterTemperature(i);
+    int targetTemp = heaterTargetTemp[i];
+    
+    // Calculate temperature error for this heater
+    heaterTemperatureError[i] = targetTemp - currentTemp;
+    
+    // Enable heater only if target temperature is reasonable
+    bool heaterEnabled = (targetTemp > MIN_TARGET_TEMP && targetTemp < SAFETY_MAX_TEMP && heatersEnabled);
+    
+    if (heaterEnabled) {
+      // Calculate required heater power using proportional control
+      float heaterPower = calculateHeaterPower(targetTemp, currentTemp);
+      
+      // Apply PWM duty cycle
+      setHeaterPWM(i, heaterPower);
+      
+      totalPower += heaterPower;
+      activeHeaters++;
+      
+      heaterLastUpdate[i] = currentTime;
+    } else {
+      // Heater disabled - turn off
+      setHeaterPWM(i, 0.0);
+      heaterTemperatureError[i] = 0;
+    }
+  }
+  
+  // Update legacy heaterPower variable for display compatibility
+  heaterPower = (activeHeaters > 0) ? (totalPower / activeHeaters) : 0.0;
+  
+  // Debug output (reduced frequency)
+  static unsigned long lastDebugTime = 0;
+  if (currentTime - lastDebugTime > 10000) { // Every 10 seconds
+    Serial.print("Independent Control - ");
+    for (int i = 0; i < NUM_HEATERS; i++) {
+      Serial.print("H");
+      Serial.print(i + 1);
+      Serial.print(":");
+      Serial.print(getHeaterTemperature(i), 1);
+      Serial.print("°C/");
+      Serial.print(heaterTargetTemp[i]);
+      Serial.print("°C@");
+      Serial.print((int)(heaterDutyCycle[i] * 100));
+      Serial.print("% ");
+    }
+    Serial.println();
+    lastDebugTime = currentTime;
+  }
+}
+
+// Set heater PWM duty cycle (0.0 to 1.0)
+void setHeaterPWM(int heaterIndex, float dutyCycle) {
   if (heaterIndex < 0 || heaterIndex >= NUM_HEATERS) return;
+  
+  // Clamp duty cycle to safe range
+  if (dutyCycle < 0.0) dutyCycle = 0.0;
+  if (dutyCycle > MAX_DUTY_CYCLE) dutyCycle = MAX_DUTY_CYCLE;
   
   int pin;
   switch (heaterIndex) {
-    case 0: pin = HEATER_1_PIN; break;
-    case 1: pin = HEATER_2_PIN; break;
-    case 2: pin = HEATER_3_PIN; break;
-    case 3: pin = HEATER_4_PIN; break;
+    case 0: pin = HEATER_1_PIN; break;  // Pin 2
+    case 1: pin = HEATER_2_PIN; break;  // Pin 3
+    case 2: pin = HEATER_3_PIN; break;  // Pin 4
+    case 3: pin = HEATER_4_PIN; break;  // Pin 5
     default: return;
   }
   
-  digitalWrite(pin, state ? HEATER_ON : HEATER_OFF);
-  heaterState[heaterIndex] = state;
+  // Store values for tracking
+  heaterDutyCycle[heaterIndex] = dutyCycle;
+  heaterState[heaterIndex] = (dutyCycle > 0.01); // Consider >1% as "on"
+  
+  // Apply PWM using appropriate method based on pin/timer
+  if (pin == 2) {
+    // Pin 2 -> Timer 3, Channel B (OCR3B)
+    OCR3B = (uint16_t)(dutyCycle * ICR3);
+  }
+  else if (pin == 3) {
+    // Pin 3 -> Timer 3, Channel C (OCR3C)  
+    OCR3C = (uint16_t)(dutyCycle * ICR3);
+  }
+  else if (pin == 4) {
+    // Pin 4 -> Timer 0 (avoid modifying timer, use standard analogWrite)
+    analogWrite(pin, (int)(dutyCycle * 255.0));
+  }
+  else if (pin == 5) {
+    // Pin 5 -> Timer 3, Channel A (OCR3A)
+    OCR3A = (uint16_t)(dutyCycle * ICR3);
+  }
+  else {
+    // Fallback for any other pins
+    analogWrite(pin, (int)(dutyCycle * 255.0));
+  }
+}
+
+// Get temperature reading for specific heater's thermistor
+float getHeaterTemperature(int heaterIndex) {
+  switch (heaterIndex) {
+    case 0: return currentTemperature1; // Heater 1 -> Thermistor 1
+    case 1: return currentTemperature2; // Heater 2 -> Thermistor 2
+    case 2: return currentTemperature1; // Heater 3 -> Thermistor 1 (fallback)
+    case 3: return currentTemperature2; // Heater 4 -> Thermistor 2 (fallback)
+    default: return currentTemperature1;
+  }
+}
+
+// Legacy function for compatibility - now uses PWM internally
+void setHeaterState(int heaterIndex, bool state) {
+  // Convert boolean state to PWM duty cycle
+  float dutyCycle = state ? heaterDutyCycle[heaterIndex] : 0.0;
+  setHeaterPWM(heaterIndex, dutyCycle);
 }
 
 // Global emergency warning flag
@@ -1156,6 +1271,50 @@ void resetSafetyTimeout() {
   safetyTimeoutReset = false;
   // Note: The actual variables are static in updateHeaterControl()
   // This function mainly provides a way to force reset via serial commands
+}
+
+// Configure PWM frequency for MOSFET control
+void configurePWMFrequency() {
+  Serial.print("Configuring PWM frequency to ");
+  Serial.print(HEATER_PWM_FREQUENCY_HZ);
+  Serial.println("Hz for MOSFET control...");
+  
+  // Configure Timer 3 for pins 2, 3, 5 (HEATER_1_PIN, HEATER_2_PIN, HEATER_4_PIN)
+  // Timer 3 is a 16-bit timer on Arduino Mega
+  
+  // Calculate TOP value for desired frequency
+  // PWM frequency = F_CPU / (prescaler × (1 + ICR3))
+  // For 30Hz: 30 = 16,000,000 / (64 × (1 + ICR3))
+  // ICR3 = (16,000,000 / (64 × 30)) - 1 = 8332
+  
+  const uint16_t prescaler = 64;
+  const uint16_t top_value = (F_CPU / (prescaler * HEATER_PWM_FREQUENCY_HZ)) - 1;
+  
+  // Set Timer 3 to Fast PWM mode with ICR3 as TOP
+  TCCR3A = _BV(COM3A1) | _BV(COM3B1) | _BV(COM3C1) | _BV(WGM31);  // Non-inverting PWM mode, WGM31
+  TCCR3B = _BV(WGM33) | _BV(WGM32) | _BV(CS31) | _BV(CS30);        // WGM33:32, prescaler = 64 (CS31:30)
+  
+  ICR3 = top_value;  // Set TOP value
+  
+  // Initialize all PWM channels to 0
+  OCR3A = 0;  // Pin 5
+  OCR3B = 0;  // Pin 2  
+  OCR3C = 0;  // Pin 3
+  
+  Serial.print("Timer 3 configured: TOP=");
+  Serial.print(top_value);
+  Serial.print(", Prescaler=");
+  Serial.print(prescaler);
+  Serial.print(", Actual frequency=");
+  Serial.print(F_CPU / (prescaler * (top_value + 1)));
+  Serial.println("Hz");
+  
+  // Note: Pin 4 (HEATER_3_PIN) uses Timer 0, which we avoid modifying
+  // as it affects millis() and delay() functions
+  if (NUM_HEATERS > 2) {
+    Serial.println("WARNING: Pin 4 (HEATER_3_PIN) uses Timer 0 - will use default Arduino PWM frequency");
+    Serial.println("Consider moving HEATER_3_PIN to pin 6, 7, or 8 for consistent PWM frequency");
+  }
 }
 
 void emergencyShutdown() {
