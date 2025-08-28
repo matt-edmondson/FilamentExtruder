@@ -91,10 +91,26 @@
 #define I2C_SCREEN_ADDRESS2 0x3D
 
 // ========================================
-// MOTOR CONTROL SETTINGS
+// STEPPER MOTOR CONTROL (NEMA 17 + L298N)
 // ========================================
-#define TORQUE 1000
-#define MAX_SPEED_RPM 1000
+#define STEPPER_TORQUE_PERCENT 50  // Stepper holding torque (50-100%) - configurable
+#define MAX_SPEED_RPM 300          // Maximum stepper speed (NEMA 17 typical max)
+#define MIN_SPEED_RPM 1            // Minimum reliable speed
+#define STEPS_PER_REVOLUTION 200   // NEMA 17: 1.8° per step = 200 steps/rev
+#define MICROSTEPS 1               // Full steps (no microstepping)
+
+// L298N controlling NEMA 17 Stepper (4-wire bipolar)
+#define STEPPER_ENA_PIN 6          // Enable A (coil A enable)
+#define STEPPER_IN1_PIN 7          // Coil A+ 
+#define STEPPER_IN2_PIN 8          // Coil A-
+#define STEPPER_IN3_PIN 9          // Coil B+
+#define STEPPER_IN4_PIN 10         // Coil B-
+#define STEPPER_ENB_PIN 11         // Enable B (coil B enable)
+
+// Stepper control settings
+#define STEPPER_FORWARD true
+#define STEPPER_REVERSE false
+#define STEPPER_HOLD_MODE true     // Keep coils energized when stopped (holding torque)
 
 // Temperature control settings
 #define MIN_TARGET_TEMP 10         // Minimum target temperature to enable heaters (prevents accidental heating)
@@ -115,8 +131,16 @@
 #define PID_OUTPUT_MAX MAX_DUTY_CYCLE // Maximum PID output (95% duty cycle)
 #define PID_INTEGRAL_MAX 100.0     // Maximum integral term to prevent windup
 
-// Control variables
-int targetSpeed = 0;
+// Stepper control variables
+int targetSpeed = 0;                // Target stepper speed (0-MAX_SPEED_RPM)
+int currentStepperSpeed = 0;        // Current stepper speed
+bool stepperDirection = STEPPER_FORWARD; // Stepper direction
+bool stepperEnabled = false;        // Stepper enable state
+unsigned long stepDelayMicros = 0;  // Microseconds between steps
+int currentStep = 0;                // Current step position (0-3 for full-step)
+unsigned long lastStepTime = 0;     // Timestamp of last step
+long totalSteps = 0;                // Total steps taken (for position tracking)
+
 int targetTemperature = 0;
 float currentTemperature1 = 0;      // Primary thermistor (A0)
 float currentTemperature2 = 0;      // Secondary thermistor (A1)  
@@ -152,6 +176,7 @@ uint16_t pot2Value = 0;
 void initializeI2C();
 bool initializeDisplay();
 void initializeHeaters();
+void initializeStepper();
 void configurePWMFrequency();
 uint16_t readAnalogPot(int pin);
 float readTemperature(int thermistorPin);
@@ -162,6 +187,11 @@ void setHeaterState(int heaterIndex, bool state);
 void setHeaterPWM(int heaterIndex, float dutyCycle);
 void updateIndependentHeaterControl();
 float getHeaterTemperature(int heaterIndex);
+void setStepperSpeed(int speedRPM, bool direction);
+void stepStepper();
+void stopStepper();
+void updateStepperControl();
+void setStepperCoils(int step);
 void emergencyShutdown();
 void resetEmergencyWarning();
 float calculatePID(int heaterIndex, float setpoint, float input);
@@ -200,6 +230,9 @@ void setup() {
   // Initialize heater control pins
   initializeHeaters();
   
+  // Initialize stepper motor control
+  initializeStepper();
+  
   pot1Value = readAnalogPot(SPEED_POT_PIN);
   pot2Value = readAnalogPot(TEMP_POT_PIN);
   
@@ -212,7 +245,9 @@ void setup() {
   Serial.print(NUM_HEATERS);
   Serial.print(" heaters @ ");
   Serial.print(HEATER_PWM_FREQUENCY_HZ);
-  Serial.print("Hz, PID(");
+  Serial.print("Hz, NEMA17 stepper @ ");
+  Serial.print(STEPPER_TORQUE_PERCENT);
+  Serial.print("%, PID(");
   Serial.print(PID_KP);
   Serial.print(",");
   Serial.print(PID_KI);
@@ -238,6 +273,9 @@ void loop() {
   for (int i = 0; i < NUM_HEATERS; i++) {
     heaterTargetTemp[i] = targetTemperature;
   }
+  
+  // Update stepper control based on speed potentiometer
+  updateStepperControl();
   
   // Update independent heater control based on their respective thermistors
   updateIndependentHeaterControl();
@@ -279,7 +317,9 @@ void loop() {
   
   // Minimal debug - only major changes or every 60 seconds
   if (valuesChanged || (millis() - lastDebug > 60000)) {
-    Serial.print("T1:");
+    Serial.print("Stepper:");
+    Serial.print(currentStepperSpeed);
+    Serial.print("RPM T1:");
     Serial.print(currentTemperature1, 0);
     Serial.print("°C T2:");
     Serial.print(currentTemperature2, 0);
@@ -536,7 +576,11 @@ void updateDisplay() {
   if (speedChanged || forceFullRefresh) {
     display.fillRect(50, 38, 70, 8, SSD1351_BLACK); // Clear speed value area
     display.setCursor(50, 38);
-    display.setTextColor(SSD1351_CYAN);
+        if (stepperEnabled) {
+      display.setTextColor(SSD1351_GREEN);
+    } else {
+      display.setTextColor(SSD1351_CYAN);
+    }
     display.print(targetSpeed);
     display.setTextColor(SSD1351_WHITE);
     display.print(" RPM");
@@ -1039,9 +1083,9 @@ void updateIndependentHeaterControl() {
         Serial.print(currentTemp, 1);
         Serial.print("°C -> ");
         Serial.print(targetTemp);
-        Serial.print("°C @ ");
+    Serial.print("°C @ ");
         Serial.print((int)(pidOutput * 100));
-        Serial.println("%");
+    Serial.println("%");
         lastHeaterDebug = currentTime;
       }
     } else {
@@ -1060,7 +1104,7 @@ void updateIndependentHeaterControl() {
   bool significantChange = false;
   
   // Only debug if duty cycle changed by >10% or every 30 seconds
-  for (int i = 0; i < NUM_HEATERS; i++) {
+    for (int i = 0; i < NUM_HEATERS; i++) {
     if (fabs(heaterDutyCycle[i] - lastDebugDuty[i]) > 0.1) {
       significantChange = true;
       lastDebugDuty[i] = heaterDutyCycle[i];
@@ -1149,7 +1193,171 @@ void resetEmergencyWarning() {
   emergencyWarningShown = false;
 }
 
+// Initialize NEMA 17 stepper with L298N driver
+void initializeStepper() {
+  // Configure stepper control pins as outputs
+  pinMode(STEPPER_ENA_PIN, OUTPUT);
+  pinMode(STEPPER_IN1_PIN, OUTPUT);
+  pinMode(STEPPER_IN2_PIN, OUTPUT);
+  pinMode(STEPPER_IN3_PIN, OUTPUT);
+  pinMode(STEPPER_IN4_PIN, OUTPUT);
+  pinMode(STEPPER_ENB_PIN, OUTPUT);
+  
+  // Initialize stepper to stopped state
+  stopStepper();
+  
+  Serial.print("NEMA 17 stepper initialized on pins ");
+  Serial.print(STEPPER_ENA_PIN);
+  Serial.print("-");
+  Serial.print(STEPPER_ENB_PIN);
+  Serial.print(", ");
+  Serial.print(STEPS_PER_REVOLUTION);
+  Serial.print(" steps/rev, Torque: ");
+  Serial.print(STEPPER_TORQUE_PERCENT);
+  Serial.println("%");
+}
 
+// Set stepper speed and direction
+void setStepperSpeed(int speedRPM, bool direction) {
+  // Clamp speed to valid range
+  if (speedRPM < 0) speedRPM = 0;
+  if (speedRPM > MAX_SPEED_RPM) speedRPM = MAX_SPEED_RPM;
+  
+  currentStepperSpeed = speedRPM;
+  stepperDirection = direction;
+  stepperEnabled = (speedRPM > 0);
+  
+  if (stepperEnabled && speedRPM >= MIN_SPEED_RPM) {
+    // Calculate step delay from RPM
+    // RPM -> steps per second -> microseconds per step
+    long stepsPerSecond = (long)speedRPM * STEPS_PER_REVOLUTION / 60;
+    if (stepsPerSecond > 0) {
+      stepDelayMicros = 1000000UL / stepsPerSecond;
+    } else {
+      stepDelayMicros = 1000000UL; // 1 second default for very slow speeds
+    }
+    
+    // Enable coil drivers with torque limiting
+    int torqueValue = (255 * STEPPER_TORQUE_PERCENT) / 100;
+    analogWrite(STEPPER_ENA_PIN, torqueValue);
+    analogWrite(STEPPER_ENB_PIN, torqueValue);
+  } else {
+    stepperEnabled = false;
+    stepDelayMicros = 0;
+  }
+}
+
+// Full-step sequence for bipolar stepper (4 steps per cycle)
+void setStepperCoils(int step) {
+  switch (step % 4) {
+    case 0: // Step 1: A+, B-
+      digitalWrite(STEPPER_IN1_PIN, HIGH);
+      digitalWrite(STEPPER_IN2_PIN, LOW);
+      digitalWrite(STEPPER_IN3_PIN, LOW);
+      digitalWrite(STEPPER_IN4_PIN, HIGH);
+      break;
+    case 1: // Step 2: A+, B+
+      digitalWrite(STEPPER_IN1_PIN, HIGH);
+      digitalWrite(STEPPER_IN2_PIN, LOW);
+      digitalWrite(STEPPER_IN3_PIN, HIGH);
+      digitalWrite(STEPPER_IN4_PIN, LOW);
+      break;
+    case 2: // Step 3: A-, B+
+      digitalWrite(STEPPER_IN1_PIN, LOW);
+      digitalWrite(STEPPER_IN2_PIN, HIGH);
+      digitalWrite(STEPPER_IN3_PIN, HIGH);
+      digitalWrite(STEPPER_IN4_PIN, LOW);
+      break;
+    case 3: // Step 4: A-, B-
+      digitalWrite(STEPPER_IN1_PIN, LOW);
+      digitalWrite(STEPPER_IN2_PIN, HIGH);
+      digitalWrite(STEPPER_IN3_PIN, LOW);
+      digitalWrite(STEPPER_IN4_PIN, HIGH);
+      break;
+  }
+}
+
+// Execute one step if timing is right
+void stepStepper() {
+  if (!stepperEnabled || stepDelayMicros == 0) return;
+  
+  unsigned long currentTime = micros();
+  if (currentTime - lastStepTime >= stepDelayMicros) {
+    // Advance or retreat step based on direction
+    if (stepperDirection == STEPPER_FORWARD) {
+      currentStep++;
+      totalSteps++;
+    } else {
+      currentStep--;
+      totalSteps--;
+    }
+    
+    // Keep currentStep in 0-3 range
+    currentStep = ((currentStep % 4) + 4) % 4;
+    
+    // Set coil states for this step
+    setStepperCoils(currentStep);
+    
+    lastStepTime = currentTime;
+  }
+}
+
+// Stop stepper motor
+void stopStepper() {
+  stepperEnabled = false;
+  currentStepperSpeed = 0;
+  stepDelayMicros = 0;
+  
+  if (STEPPER_HOLD_MODE) {
+    // Hold position with reduced torque (50% of configured torque)
+    int holdTorque = (255 * STEPPER_TORQUE_PERCENT) / 200; // Half torque for holding
+    analogWrite(STEPPER_ENA_PIN, holdTorque);
+    analogWrite(STEPPER_ENB_PIN, holdTorque);
+    // Keep current coil state for holding
+  } else {
+    // Disable all coils (no holding torque)
+    analogWrite(STEPPER_ENA_PIN, 0);
+    analogWrite(STEPPER_ENB_PIN, 0);
+    digitalWrite(STEPPER_IN1_PIN, LOW);
+    digitalWrite(STEPPER_IN2_PIN, LOW);
+    digitalWrite(STEPPER_IN3_PIN, LOW);
+    digitalWrite(STEPPER_IN4_PIN, LOW);
+  }
+}
+
+// Update stepper control based on speed potentiometer
+void updateStepperControl() {
+  // Set stepper speed based on target speed from potentiometer  
+  setStepperSpeed(targetSpeed, STEPPER_FORWARD);
+  
+  // Execute step if it's time
+  stepStepper();
+  
+  // Debug output for stepper changes
+  static int lastDebugSpeed = -1;
+  static unsigned long lastStepperDebug = 0;
+  
+  bool speedChanged = (abs(currentStepperSpeed - lastDebugSpeed) > 10); // 10 RPM threshold
+  
+  if (speedChanged || (millis() - lastStepperDebug > 15000)) { // Every 15 seconds
+    if (currentStepperSpeed > 0) {
+      Serial.print("Stepper: ");
+      Serial.print(currentStepperSpeed);
+      Serial.print(" RPM (");
+      Serial.print(stepDelayMicros);
+      Serial.print("μs/step, ");
+      Serial.print(totalSteps);
+      Serial.print(" total steps, ");
+      Serial.print(STEPPER_TORQUE_PERCENT);
+      Serial.println("% torque)");
+    } else {
+      Serial.println("Stepper: STOPPED");
+    }
+    
+    lastDebugSpeed = currentStepperSpeed;
+    lastStepperDebug = millis();
+  }
+}
 
 // Configure PWM frequency for MOSFET control
 void configurePWMFrequency() {
@@ -1192,6 +1400,9 @@ void emergencyShutdown() {
   for (int i = 0; i < NUM_HEATERS; i++) {
     setHeaterState(i, false);
   }
+  
+  // Stop stepper immediately
+  stopStepper();
   
   // Reset control variables
   heaterPower = 0;
