@@ -94,10 +94,17 @@
 // STEPPER MOTOR CONTROL (NEMA 17 + L298N)
 // ========================================
 #define STEPPER_TORQUE_PERCENT 50  // Stepper holding torque (50-100%) - configurable
-#define MAX_SPEED_RPM 300          // Maximum stepper speed (NEMA 17 typical max)
+#define MAX_SPEED_RPM 200          // Maximum stepper speed (reduced for smoother operation)
 #define MIN_SPEED_RPM 1            // Minimum reliable speed
 #define STEPS_PER_REVOLUTION 200   // NEMA 17: 1.8° per step = 200 steps/rev
-#define MICROSTEPS 1               // Full steps (no microstepping)
+#define MICROSTEPS 2               // Half-step mode (smoother operation)
+#define ACTUAL_STEPS_PER_REV (STEPS_PER_REVOLUTION * MICROSTEPS) // 400 half-steps/rev
+
+// Stepper smoothing settings
+#define ACCEL_STEPS_PER_SEC2 800   // Acceleration rate (steps/sec²)
+#define MAX_STEP_RATE_HZ 2000      // Maximum step rate (steps/second)
+#define CURRENT_REDUCTION_PWM true // Use PWM for current control (reduces heat)
+#define IDLE_CURRENT_PERCENT 20    // Current when not moving (reduces heat)
 
 // L298N controlling NEMA 17 Stepper (4-wire bipolar)
 #define STEPPER_ENA_PIN 6          // Enable A (coil A enable)
@@ -133,13 +140,17 @@
 
 // Stepper control variables
 int targetSpeed = 0;                // Target stepper speed (0-MAX_SPEED_RPM)
-int currentStepperSpeed = 0;        // Current stepper speed
+float currentStepperSpeed = 0.0;    // Current stepper speed (float for smooth ramping)
+float targetStepRate = 0.0;         // Target step rate (steps/second)
+float currentStepRate = 0.0;        // Current step rate (steps/second)
 bool stepperDirection = STEPPER_FORWARD; // Stepper direction
 bool stepperEnabled = false;        // Stepper enable state
 unsigned long stepDelayMicros = 0;  // Microseconds between steps
-int currentStep = 0;                // Current step position (0-3 for full-step)
+int currentStep = 0;                // Current step position (0-7 for half-step)
 unsigned long lastStepTime = 0;     // Timestamp of last step
+unsigned long lastAccelTime = 0;    // Last acceleration calculation
 long totalSteps = 0;                // Total steps taken (for position tracking)
+bool stepperMoving = false;         // True when actually stepping
 
 int targetTemperature = 0;
 float currentTemperature1 = 0;      // Primary thermistor (A0)
@@ -318,7 +329,7 @@ void loop() {
   // Minimal debug - only major changes or every 60 seconds
   if (valuesChanged || (millis() - lastDebug > 60000)) {
     Serial.print("Stepper:");
-    Serial.print(currentStepperSpeed);
+    Serial.print(currentStepperSpeed, 1);
     Serial.print("RPM T1:");
     Serial.print(currentTemperature1, 0);
     Serial.print("°C T2:");
@@ -1203,119 +1214,197 @@ void initializeStepper() {
   pinMode(STEPPER_IN4_PIN, OUTPUT);
   pinMode(STEPPER_ENB_PIN, OUTPUT);
   
+  // Initialize timing variables
+  lastStepTime = micros();
+  lastAccelTime = micros();
+  currentStep = 0;
+  totalSteps = 0;
+  currentStepRate = 0.0;
+  targetStepRate = 0.0;
+  
   // Initialize stepper to stopped state
   stopStepper();
   
-  Serial.print("NEMA 17 stepper initialized on pins ");
-  Serial.print(STEPPER_ENA_PIN);
-  Serial.print("-");
-  Serial.print(STEPPER_ENB_PIN);
-  Serial.print(", ");
-  Serial.print(STEPS_PER_REVOLUTION);
-  Serial.print(" steps/rev, Torque: ");
+  Serial.print("NEMA 17 stepper initialized: ");
+  Serial.print(ACTUAL_STEPS_PER_REV);
+  Serial.print(" half-steps/rev, ");
   Serial.print(STEPPER_TORQUE_PERCENT);
-  Serial.println("%");
+  Serial.print("% torque, ");
+  Serial.print(IDLE_CURRENT_PERCENT);
+  Serial.println("% idle current");
 }
 
-// Set stepper speed and direction
+// Set stepper speed and direction with smooth acceleration
 void setStepperSpeed(int speedRPM, bool direction) {
   // Clamp speed to valid range
   if (speedRPM < 0) speedRPM = 0;
   if (speedRPM > MAX_SPEED_RPM) speedRPM = MAX_SPEED_RPM;
   
-  currentStepperSpeed = speedRPM;
   stepperDirection = direction;
   stepperEnabled = (speedRPM > 0);
   
   if (stepperEnabled && speedRPM >= MIN_SPEED_RPM) {
-    // Calculate step delay from RPM
-    // RPM -> steps per second -> microseconds per step
-    long stepsPerSecond = (long)speedRPM * STEPS_PER_REVOLUTION / 60;
-    if (stepsPerSecond > 0) {
-      stepDelayMicros = 1000000UL / stepsPerSecond;
-    } else {
-      stepDelayMicros = 1000000UL; // 1 second default for very slow speeds
+    // Calculate target step rate from RPM
+    targetStepRate = (float)speedRPM * ACTUAL_STEPS_PER_REV / 60.0;
+    
+    // Limit to maximum step rate
+    if (targetStepRate > MAX_STEP_RATE_HZ) {
+      targetStepRate = MAX_STEP_RATE_HZ;
     }
     
-    // Enable coil drivers with torque limiting
+    // Enable coils with configurable torque
     int torqueValue = (255 * STEPPER_TORQUE_PERCENT) / 100;
-    analogWrite(STEPPER_ENA_PIN, torqueValue);
-    analogWrite(STEPPER_ENB_PIN, torqueValue);
-  } else {
-    stepperEnabled = false;
-    stepDelayMicros = 0;
-  }
-}
-
-// Full-step sequence for bipolar stepper (4 steps per cycle)
-void setStepperCoils(int step) {
-  switch (step % 4) {
-    case 0: // Step 1: A+, B-
-      digitalWrite(STEPPER_IN1_PIN, HIGH);
-      digitalWrite(STEPPER_IN2_PIN, LOW);
-      digitalWrite(STEPPER_IN3_PIN, LOW);
-      digitalWrite(STEPPER_IN4_PIN, HIGH);
-      break;
-    case 1: // Step 2: A+, B+
-      digitalWrite(STEPPER_IN1_PIN, HIGH);
-      digitalWrite(STEPPER_IN2_PIN, LOW);
-      digitalWrite(STEPPER_IN3_PIN, HIGH);
-      digitalWrite(STEPPER_IN4_PIN, LOW);
-      break;
-    case 2: // Step 3: A-, B+
-      digitalWrite(STEPPER_IN1_PIN, LOW);
-      digitalWrite(STEPPER_IN2_PIN, HIGH);
-      digitalWrite(STEPPER_IN3_PIN, HIGH);
-      digitalWrite(STEPPER_IN4_PIN, LOW);
-      break;
-    case 3: // Step 4: A-, B-
-      digitalWrite(STEPPER_IN1_PIN, LOW);
-      digitalWrite(STEPPER_IN2_PIN, HIGH);
-      digitalWrite(STEPPER_IN3_PIN, LOW);
-      digitalWrite(STEPPER_IN4_PIN, HIGH);
-      break;
-  }
-}
-
-// Execute one step if timing is right
-void stepStepper() {
-  if (!stepperEnabled || stepDelayMicros == 0) return;
-  
-  unsigned long currentTime = micros();
-  if (currentTime - lastStepTime >= stepDelayMicros) {
-    // Advance or retreat step based on direction
-    if (stepperDirection == STEPPER_FORWARD) {
-      currentStep++;
-      totalSteps++;
+    if (CURRENT_REDUCTION_PWM) {
+      // Use PWM on enable pins for current control (reduces heat)
+      analogWrite(STEPPER_ENA_PIN, torqueValue);
+      analogWrite(STEPPER_ENB_PIN, torqueValue);
     } else {
-      currentStep--;
-      totalSteps--;
+      // Full enable (more heat but maximum torque)
+      digitalWrite(STEPPER_ENA_PIN, HIGH);
+      digitalWrite(STEPPER_ENB_PIN, HIGH);
+    }
+  } else {
+    targetStepRate = 0.0;
+    stepperEnabled = false;
+  }
+}
+
+// Half-step sequence for smoother bipolar stepper operation (8 steps per cycle)
+void setStepperCoils(int step) {
+  switch (step % 8) {
+    case 0: // A+
+      digitalWrite(STEPPER_IN1_PIN, HIGH);
+      digitalWrite(STEPPER_IN2_PIN, LOW);
+      digitalWrite(STEPPER_IN3_PIN, LOW);
+      digitalWrite(STEPPER_IN4_PIN, LOW);
+      break;
+    case 1: // A+, B+
+      digitalWrite(STEPPER_IN1_PIN, HIGH);
+      digitalWrite(STEPPER_IN2_PIN, LOW);
+      digitalWrite(STEPPER_IN3_PIN, HIGH);
+      digitalWrite(STEPPER_IN4_PIN, LOW);
+      break;
+    case 2: // B+
+      digitalWrite(STEPPER_IN1_PIN, LOW);
+      digitalWrite(STEPPER_IN2_PIN, LOW);
+      digitalWrite(STEPPER_IN3_PIN, HIGH);
+      digitalWrite(STEPPER_IN4_PIN, LOW);
+      break;
+    case 3: // A-, B+
+      digitalWrite(STEPPER_IN1_PIN, LOW);
+      digitalWrite(STEPPER_IN2_PIN, HIGH);
+      digitalWrite(STEPPER_IN3_PIN, HIGH);
+      digitalWrite(STEPPER_IN4_PIN, LOW);
+      break;
+    case 4: // A-
+      digitalWrite(STEPPER_IN1_PIN, LOW);
+      digitalWrite(STEPPER_IN2_PIN, HIGH);
+      digitalWrite(STEPPER_IN3_PIN, LOW);
+      digitalWrite(STEPPER_IN4_PIN, LOW);
+      break;
+    case 5: // A-, B-
+      digitalWrite(STEPPER_IN1_PIN, LOW);
+      digitalWrite(STEPPER_IN2_PIN, HIGH);
+      digitalWrite(STEPPER_IN3_PIN, LOW);
+      digitalWrite(STEPPER_IN4_PIN, HIGH);
+      break;
+    case 6: // B-
+      digitalWrite(STEPPER_IN1_PIN, LOW);
+      digitalWrite(STEPPER_IN2_PIN, LOW);
+      digitalWrite(STEPPER_IN3_PIN, LOW);
+      digitalWrite(STEPPER_IN4_PIN, HIGH);
+      break;
+    case 7: // A+, B-
+      digitalWrite(STEPPER_IN1_PIN, HIGH);
+      digitalWrite(STEPPER_IN2_PIN, LOW);
+      digitalWrite(STEPPER_IN3_PIN, LOW);
+      digitalWrite(STEPPER_IN4_PIN, HIGH);
+      break;
+  }
+}
+
+// Execute smooth acceleration and stepping
+void stepStepper() {
+  unsigned long currentTime = micros();
+  
+  // Update acceleration every 10ms for smooth ramping
+  if (currentTime - lastAccelTime >= 10000) { // 10ms
+    float deltaTime = (currentTime - lastAccelTime) / 1000000.0; // Convert to seconds
+    
+    if (stepperEnabled && targetStepRate > currentStepRate) {
+      // Accelerate towards target
+      currentStepRate += ACCEL_STEPS_PER_SEC2 * deltaTime;
+      if (currentStepRate > targetStepRate) {
+        currentStepRate = targetStepRate;
+      }
+    } else if (!stepperEnabled || targetStepRate < currentStepRate) {
+      // Decelerate towards target (or zero if disabled)
+      float targetRate = stepperEnabled ? targetStepRate : 0.0;
+      currentStepRate -= ACCEL_STEPS_PER_SEC2 * deltaTime;
+      if (currentStepRate < targetRate) {
+        currentStepRate = targetRate;
+      }
+      if (currentStepRate < 0) currentStepRate = 0;
     }
     
-    // Keep currentStep in 0-3 range
-    currentStep = ((currentStep % 4) + 4) % 4;
+    // Calculate step delay from current step rate
+    if (currentStepRate > 0.1) {
+      stepDelayMicros = (unsigned long)(1000000.0 / currentStepRate);
+      stepperMoving = true;
+    } else {
+      stepDelayMicros = 0;
+      currentStepRate = 0.0;
+      stepperMoving = false;
+    }
     
-    // Set coil states for this step
-    setStepperCoils(currentStep);
+    // Update speed for display
+    currentStepperSpeed = currentStepRate * 60.0 / ACTUAL_STEPS_PER_REV;
     
-    lastStepTime = currentTime;
+    lastAccelTime = currentTime;
+  }
+  
+  // Execute step if it's time
+  if (stepperMoving && stepDelayMicros > 0) {
+    if (currentTime - lastStepTime >= stepDelayMicros) {
+      // Advance or retreat step based on direction
+      if (stepperDirection == STEPPER_FORWARD) {
+        currentStep++;
+        totalSteps++;
+      } else {
+        currentStep--;
+        totalSteps--;
+      }
+      
+      // Keep currentStep in 0-7 range for half-stepping
+      currentStep = ((currentStep % 8) + 8) % 8;
+      
+      // Set coil states for this step
+      setStepperCoils(currentStep);
+      
+      lastStepTime = currentTime;
+    }
   }
 }
 
-// Stop stepper motor
+// Stop stepper motor with smooth deceleration
 void stopStepper() {
   stepperEnabled = false;
-  currentStepperSpeed = 0;
-  stepDelayMicros = 0;
+  targetStepRate = 0.0;
+  // Note: currentStepRate will ramp down via stepStepper() acceleration logic
   
+  // Use idle current to reduce heat while maintaining position
   if (STEPPER_HOLD_MODE) {
-    // Hold position with reduced torque (50% of configured torque)
-    int holdTorque = (255 * STEPPER_TORQUE_PERCENT) / 200; // Half torque for holding
-    analogWrite(STEPPER_ENA_PIN, holdTorque);
-    analogWrite(STEPPER_ENB_PIN, holdTorque);
-    // Keep current coil state for holding
+    int idleTorque = (255 * IDLE_CURRENT_PERCENT) / 100;
+    if (CURRENT_REDUCTION_PWM) {
+      analogWrite(STEPPER_ENA_PIN, idleTorque);
+      analogWrite(STEPPER_ENB_PIN, idleTorque);
+    } else {
+      analogWrite(STEPPER_ENA_PIN, idleTorque);
+      analogWrite(STEPPER_ENB_PIN, idleTorque);
+    }
+    // Keep current coil state for position holding
   } else {
-    // Disable all coils (no holding torque)
+    // Disable all coils (no holding torque - motor may lose position)
     analogWrite(STEPPER_ENA_PIN, 0);
     analogWrite(STEPPER_ENB_PIN, 0);
     digitalWrite(STEPPER_IN1_PIN, LOW);
@@ -1334,24 +1423,30 @@ void updateStepperControl() {
   stepStepper();
   
   // Debug output for stepper changes
-  static int lastDebugSpeed = -1;
+  static float lastDebugSpeed = -1;
   static unsigned long lastStepperDebug = 0;
   
-  bool speedChanged = (abs(currentStepperSpeed - lastDebugSpeed) > 10); // 10 RPM threshold
+  bool speedChanged = (abs(currentStepperSpeed - lastDebugSpeed) > 5); // 5 RPM threshold
   
   if (speedChanged || (millis() - lastStepperDebug > 15000)) { // Every 15 seconds
-    if (currentStepperSpeed > 0) {
+    if (stepperMoving && currentStepperSpeed > 0) {
       Serial.print("Stepper: ");
-      Serial.print(currentStepperSpeed);
+      Serial.print(currentStepperSpeed, 1);
       Serial.print(" RPM (");
+      Serial.print((int)currentStepRate);
+      Serial.print(" steps/sec, ");
       Serial.print(stepDelayMicros);
       Serial.print("μs/step, ");
       Serial.print(totalSteps);
-      Serial.print(" total steps, ");
-      Serial.print(STEPPER_TORQUE_PERCENT);
-      Serial.println("% torque)");
+      Serial.println(" total)");
+    } else if (stepperEnabled) {
+      Serial.print("Stepper: ACCELERATING (target ");
+      Serial.print(targetSpeed);
+      Serial.println(" RPM)");
     } else {
-      Serial.println("Stepper: STOPPED");
+      Serial.print("Stepper: STOPPED (");
+      Serial.print(IDLE_CURRENT_PERCENT);
+      Serial.println("% holding current)");
     }
     
     lastDebugSpeed = currentStepperSpeed;
