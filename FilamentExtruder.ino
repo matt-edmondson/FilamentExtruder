@@ -98,8 +98,8 @@
 #define MAX_SPEED_RPM 500          // Maximum stepper speed 
 #define MIN_SPEED_RPM 1            // Minimum reliable speed
 #define STEPS_PER_REVOLUTION 200   // NEMA 17: 1.8° per step = 200 steps/rev
-#define MICROSTEPS 2               // Half-step mode (smoother operation)
-#define ACTUAL_STEPS_PER_REV (STEPS_PER_REVOLUTION * MICROSTEPS) // 400 half-steps/rev
+#define MICROSTEPS 1               // Full-step mode (more reliable, less complex)
+#define ACTUAL_STEPS_PER_REV (STEPS_PER_REVOLUTION * MICROSTEPS) // 200 full-steps/rev
 
 // Dynamic torque settings
 #define TORQUE_RAMP_START_RPM 1   // RPM where torque starts ramping up
@@ -153,7 +153,7 @@ float currentStepRate = 0.0;        // Current step rate (steps/second)
 bool stepperDirection = STEPPER_FORWARD; // Stepper direction
 bool stepperEnabled = false;        // Stepper enable state
 unsigned long stepDelayMicros = 0;  // Microseconds between steps
-int currentStep = 0;                // Current step position (0-7 for half-step)
+int currentStep = 0;                // Current step position (0-3 for full-step)
 unsigned long lastStepTime = 0;     // Timestamp of last step
 unsigned long lastAccelTime = 0;    // Last acceleration calculation
 long totalSteps = 0;                // Total steps taken (for position tracking)
@@ -759,10 +759,10 @@ void drawTorqueSpeedPlot() {
   display.print("500");
   
   display.setCursor(plotX - 8, plotY - 2);
-  display.print("50%");
+  display.print("75%");
   
   display.setCursor(plotX - 8, plotY + plotHeight - 6);
-  display.print("15%");
+  display.print("30%");
   
   // Draw torque curve
   for (int x = 1; x < plotWidth - 1; x++) {
@@ -1289,7 +1289,7 @@ void initializeStepper() {
   
   Serial.print("NEMA 17 stepper initialized: ");
   Serial.print(ACTUAL_STEPS_PER_REV);
-  Serial.print(" half-steps/rev, dynamic torque ");
+  Serial.print(" full-steps/rev, dynamic torque ");
   Serial.print(STEPPER_TORQUE_MIN_PERCENT);
   Serial.print("-");
   Serial.print(STEPPER_TORQUE_MAX_PERCENT);
@@ -1377,14 +1377,14 @@ void setStepperSpeed(int speedRPM, bool direction) {
   }
 }
 
-// Half-step sequence for smoother bipolar stepper operation (8 steps per cycle)
+// Full-step sequence for bipolar stepper operation (4 steps per cycle)
 void setStepperCoils(int step) {
-  switch (step % 8) {
-    case 0: // A+
+  switch (step % 4) {
+    case 0: // A+, B-
       digitalWrite(STEPPER_IN1_PIN, HIGH);
       digitalWrite(STEPPER_IN2_PIN, LOW);
       digitalWrite(STEPPER_IN3_PIN, LOW);
-      digitalWrite(STEPPER_IN4_PIN, LOW);
+      digitalWrite(STEPPER_IN4_PIN, HIGH);
       break;
     case 1: // A+, B+
       digitalWrite(STEPPER_IN1_PIN, HIGH);
@@ -1392,39 +1392,15 @@ void setStepperCoils(int step) {
       digitalWrite(STEPPER_IN3_PIN, HIGH);
       digitalWrite(STEPPER_IN4_PIN, LOW);
       break;
-    case 2: // B+
-      digitalWrite(STEPPER_IN1_PIN, LOW);
-      digitalWrite(STEPPER_IN2_PIN, LOW);
-      digitalWrite(STEPPER_IN3_PIN, HIGH);
-      digitalWrite(STEPPER_IN4_PIN, LOW);
-      break;
-    case 3: // A-, B+
+    case 2: // A-, B+
       digitalWrite(STEPPER_IN1_PIN, LOW);
       digitalWrite(STEPPER_IN2_PIN, HIGH);
       digitalWrite(STEPPER_IN3_PIN, HIGH);
       digitalWrite(STEPPER_IN4_PIN, LOW);
       break;
-    case 4: // A-
+    case 3: // A-, B-
       digitalWrite(STEPPER_IN1_PIN, LOW);
       digitalWrite(STEPPER_IN2_PIN, HIGH);
-      digitalWrite(STEPPER_IN3_PIN, LOW);
-      digitalWrite(STEPPER_IN4_PIN, LOW);
-      break;
-    case 5: // A-, B-
-      digitalWrite(STEPPER_IN1_PIN, LOW);
-      digitalWrite(STEPPER_IN2_PIN, HIGH);
-      digitalWrite(STEPPER_IN3_PIN, LOW);
-      digitalWrite(STEPPER_IN4_PIN, HIGH);
-      break;
-    case 6: // B-
-      digitalWrite(STEPPER_IN1_PIN, LOW);
-      digitalWrite(STEPPER_IN2_PIN, LOW);
-      digitalWrite(STEPPER_IN3_PIN, LOW);
-      digitalWrite(STEPPER_IN4_PIN, HIGH);
-      break;
-    case 7: // A+, B-
-      digitalWrite(STEPPER_IN1_PIN, HIGH);
-      digitalWrite(STEPPER_IN2_PIN, LOW);
       digitalWrite(STEPPER_IN3_PIN, LOW);
       digitalWrite(STEPPER_IN4_PIN, HIGH);
       break;
@@ -1502,8 +1478,8 @@ void stepStepper() {
         totalSteps--;
       }
       
-      // Keep currentStep in 0-7 range for half-stepping
-      currentStep = ((currentStep % 8) + 8) % 8;
+      // Keep currentStep in 0-3 range for full-stepping
+      currentStep = ((currentStep % 4) + 4) % 4;
       
       // Set coil states for this step
       setStepperCoils(currentStep);
