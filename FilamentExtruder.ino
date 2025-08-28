@@ -93,15 +93,22 @@
 // ========================================
 // STEPPER MOTOR CONTROL (NEMA 17 + L298N)
 // ========================================
-#define STEPPER_TORQUE_PERCENT 20  // Stepper holding torque (20-100%) - configurable
-#define MAX_SPEED_RPM 500          // Maximum stepper speed (reduced for smoother operation)
+#define STEPPER_TORQUE_MIN_PERCENT 30  // Minimum torque at low RPM (very efficient)
+#define STEPPER_TORQUE_MAX_PERCENT 75  // Maximum torque at high RPM (performance)
+#define MAX_SPEED_RPM 500          // Maximum stepper speed 
 #define MIN_SPEED_RPM 1            // Minimum reliable speed
 #define STEPS_PER_REVOLUTION 200   // NEMA 17: 1.8° per step = 200 steps/rev
 #define MICROSTEPS 2               // Half-step mode (smoother operation)
 #define ACTUAL_STEPS_PER_REV (STEPS_PER_REVOLUTION * MICROSTEPS) // 400 half-steps/rev
 
+// Dynamic torque settings
+#define TORQUE_RAMP_START_RPM 1   // RPM where torque starts ramping up
+#define TORQUE_RAMP_END_RPM 300    // RPM where torque reaches maximum
+#define ACCEL_TORQUE_BOOST_PERCENT 20  // Extra torque during acceleration (adds to base torque)
+#define ACCEL_DETECTION_THRESHOLD 1    // RPM/sec threshold to detect significant acceleration
+
 // Stepper smoothing settings
-#define ACCEL_STEPS_PER_SEC2 500   // Acceleration rate (steps/sec²)
+#define ACCEL_STEPS_PER_SEC2 250   // Acceleration rate (steps/sec²)
 #define MAX_STEP_RATE_HZ 3333      // Maximum step rate (steps/second)
 #define CURRENT_REDUCTION_PWM true // Use PWM for current control (reduces heat)
 #define IDLE_CURRENT_PERCENT 15    // Current when not moving (reduces heat)
@@ -151,6 +158,10 @@ unsigned long lastStepTime = 0;     // Timestamp of last step
 unsigned long lastAccelTime = 0;    // Last acceleration calculation
 long totalSteps = 0;                // Total steps taken (for position tracking)
 bool stepperMoving = false;         // True when actually stepping
+int currentTorquePercent = 0;       // Current torque percentage (for display)
+bool isAccelerating = false;        // True when stepper is accelerating significantly
+float lastSpeedForAccel = 0.0;      // Previous speed for acceleration calculation
+unsigned long lastAccelCheckTime = 0; // Last time we checked acceleration
 
 int targetTemperature = 0;
 float currentTemperature1 = 0;      // Primary thermistor (A0)
@@ -199,11 +210,13 @@ void setHeaterPWM(int heaterIndex, float dutyCycle);
 void updateIndependentHeaterControl();
 float getHeaterTemperature(int heaterIndex);
 void setStepperSpeed(int speedRPM, bool direction);
+int calculateDynamicTorque(int speedRPM);
 void stepStepper();
 void stopStepper();
 void turnOffStepper();
 void updateStepperControl();
 void setStepperCoils(int step);
+void drawTorqueSpeedPlot();
 void emergencyShutdown();
 void resetEmergencyWarning();
 float calculatePID(int heaterIndex, float setpoint, float input);
@@ -589,7 +602,7 @@ void updateDisplay() {
         if (stepperEnabled) {
       display.setTextColor(SSD1351_GREEN);
     } else {
-      display.setTextColor(SSD1351_CYAN);
+    display.setTextColor(SSD1351_CYAN);
     }
     display.print(targetSpeed);
     display.setTextColor(SSD1351_WHITE);
@@ -652,38 +665,9 @@ void updateDisplay() {
     display.print("C");
   }
   
-  // Temperature progress bar (only redraw if temperature changed) - moved down due to new layout
-  if (currentTempChanged || targetTempChanged || forceFullRefresh) {
-    int barY = 84;  // Moved down to accommodate T2 and Diff lines
-    int barHeight = 6; // Slightly smaller
-    int barWidth = SCREEN_WIDTH - 20;
-    
-    // Clear bar interior
-    display.fillRect(11, barY+1, barWidth-2, barHeight-2, SSD1351_BLACK);
-    
-    int tempBarFill = 0;
-    if (targetTemperature > 0) {
-      // Use primary temperature (T1) for the bar
-      tempBarFill = map(constrain(currentTemperature1, 0, targetTemperature), 0, targetTemperature, 0, barWidth-2);
-    }
-    
-    // Fill temperature bar with gradient effect
-    if (tempBarFill > 0) {
-      for (int x = 0; x < tempBarFill; x++) {
-        uint16_t barColor;
-        if (x < tempBarFill/3) {
-          barColor = SSD1351_BLUE;
-        } else if (x < (2*tempBarFill)/3) {
-          barColor = SSD1351_YELLOW;
-        } else {
-          barColor = SSD1351_RED;
-        }
-        display.drawLine(11+x, barY+1, 11+x, barY+barHeight-2, barColor);
-      }
-    }
-    
-    // Draw static bar outline
-    display.drawRect(10, barY, barWidth, barHeight, SSD1351_WHITE); // Temp bar
+  // Torque vs Speed XY plot (replaces temperature bar)
+  if (speedChanged || currentTempChanged || forceFullRefresh) {
+    drawTorqueSpeedPlot();
   }
   
   // Heater status area
@@ -706,45 +690,30 @@ void updateDisplay() {
     display.setTextColor(SSD1351_WHITE);
     display.print("%");
     
-    // Power level bar
-    display.fillRect(6, 117, 60, 4, SSD1351_BLACK); // Clear bar interior
+    // Power level bar (smaller since we have torque plot above)
+    display.fillRect(6, 115, 60, 3, SSD1351_BLACK); // Clear bar interior
     int powerBarWidth = map(heaterPower * 100, 0, 100, 0, 60);
     if (powerBarWidth > 0) {
       uint16_t powerColor = (heaterPower > 0.7) ? SSD1351_RED : 
                            (heaterPower > 0.4) ? SSD1351_YELLOW : SSD1351_GREEN;
-      display.fillRect(6, 117, powerBarWidth, 4, powerColor);
+      display.fillRect(6, 115, powerBarWidth, 3, powerColor);
     }
   }
   
-  // Individual heater duty cycle bars (visual representation)
-  if (powerChanged || heaterStateChanged || forceFullRefresh) {
-    int barY = 105; // Position below power text
-    int barWidth = 25; // Width per heater bar
-    int barHeight = 3; // Small bars
-    int barSpacing = 30; // Space between bars
-    
-    for (int i = 0; i < NUM_HEATERS; i++) {
-      int barX = 75 + (i * barSpacing);
-      
-      // Clear individual bar area
-      display.fillRect(barX, barY, barWidth, barHeight, SSD1351_BLACK);
-      
-      // Draw bar outline
-      display.drawRect(barX, barY, barWidth, barHeight, SSD1351_WHITE);
-      
-      // Fill bar based on duty cycle
-      int fillWidth = map(heaterDutyCycle[i] * 100, 0, 100, 0, barWidth - 2);
-      if (fillWidth > 0) {
-        uint16_t barColor;
-        if (heaterDutyCycle[i] < 0.33) {
-          barColor = SSD1351_GREEN;
-        } else if (heaterDutyCycle[i] < 0.67) {
-          barColor = SSD1351_YELLOW;
-        } else {
-          barColor = SSD1351_RED;
-        }
-        display.fillRect(barX + 1, barY + 1, fillWidth, barHeight - 2, barColor);
-      }
+  // Stepper motor status (replaces heater bars)
+  if (speedChanged || forceFullRefresh) {
+    display.fillRect(70, 105, 58, 8, SSD1351_BLACK); // Clear stepper status area
+    display.setCursor(70, 105);
+    if (isAccelerating && stepperEnabled) {
+      display.setTextColor(SSD1351_RED); // Red when boosting
+      display.print("T:");
+      display.print(currentTorquePercent);
+      display.print("% BOOST");
+    } else {
+      display.setTextColor(SSD1351_CYAN);
+      display.print("Torque:");
+      display.print(currentTorquePercent);
+      display.print("%");
     }
   }
   
@@ -758,6 +727,97 @@ void updateDisplay() {
   lastHeatersEnabled = heatersEnabled;
   for (int i = 0; i < NUM_HEATERS; i++) {
     lastHeaterStates[i] = heaterState[i];
+  }
+}
+
+// Draw Torque vs Speed XY plot
+void drawTorqueSpeedPlot() {
+  // Plot area dimensions
+  const int plotX = 10;
+  const int plotY = 84;
+  const int plotWidth = SCREEN_WIDTH - 20;  // 108 pixels
+  const int plotHeight = 20;
+  
+  // Clear plot area
+  display.fillRect(plotX, plotY, plotWidth, plotHeight, SSD1351_BLACK);
+  
+  // Draw plot frame
+  display.drawRect(plotX, plotY, plotWidth, plotHeight, SSD1351_WHITE);
+  
+  // Draw title
+  display.setCursor(plotX + 25, plotY - 10);
+  display.setTextColor(SSD1351_CYAN);
+  display.print("Torque vs Speed");
+  
+  // Draw axis labels
+  display.setCursor(plotX - 8, plotY + plotHeight + 2);
+  display.setTextColor(SSD1351_WHITE);
+  display.setTextSize(1);
+  display.print("0");
+  
+  display.setCursor(plotX + plotWidth - 12, plotY + plotHeight + 2);
+  display.print("500");
+  
+  display.setCursor(plotX - 8, plotY - 2);
+  display.print("50%");
+  
+  display.setCursor(plotX - 8, plotY + plotHeight - 6);
+  display.print("15%");
+  
+  // Draw torque curve
+  for (int x = 1; x < plotWidth - 1; x++) {
+    // Convert plot X to RPM
+    int rpm = map(x, 0, plotWidth - 1, 0, MAX_SPEED_RPM);
+    
+    // Calculate torque for this RPM
+    int torquePercent = calculateDynamicTorque(rpm);
+    
+    // Convert torque to plot Y coordinate (flip Y axis since screen coords are inverted)
+    int plotYPos = map(torquePercent, STEPPER_TORQUE_MIN_PERCENT, STEPPER_TORQUE_MAX_PERCENT, 
+                      plotY + plotHeight - 2, plotY + 1);
+    
+    // Draw curve point
+    uint16_t curveColor = SSD1351_GREEN;
+    if (rpm >= TORQUE_RAMP_START_RPM && rpm <= TORQUE_RAMP_END_RPM) {
+      curveColor = SSD1351_YELLOW; // Ramp zone
+    } else if (rpm > TORQUE_RAMP_END_RPM) {
+      curveColor = SSD1351_RED; // High torque zone
+    }
+    
+    display.drawPixel(plotX + x, plotYPos, curveColor);
+  }
+  
+  // Mark current position with a larger dot
+  if (stepperEnabled && currentStepperSpeed > 0) {
+    int currentX = map(constrain(currentStepperSpeed, 0, MAX_SPEED_RPM), 0, MAX_SPEED_RPM, 0, plotWidth - 1);
+    int currentY = map(currentTorquePercent, STEPPER_TORQUE_MIN_PERCENT, STEPPER_TORQUE_MAX_PERCENT, 
+                      plotY + plotHeight - 2, plotY + 1);
+    
+    // Choose marker color based on acceleration status
+    uint16_t markerColor = isAccelerating ? SSD1351_RED : SSD1351_WHITE;
+    
+    // Draw 3x3 current position marker
+    for (int dx = -1; dx <= 1; dx++) {
+      for (int dy = -1; dy <= 1; dy++) {
+        int markX = plotX + currentX + dx;
+        int markY = currentY + dy;
+        if (markX >= plotX && markX < plotX + plotWidth && markY >= plotY && markY < plotY + plotHeight) {
+          display.drawPixel(markX, markY, markerColor);
+        }
+      }
+    }
+  }
+  
+  // Add grid lines for better readability
+  // Vertical grid lines at key RPM values
+  int gridRPMs[] = {TORQUE_RAMP_START_RPM, TORQUE_RAMP_END_RPM, 300};
+  for (int i = 0; i < 3; i++) {
+    if (gridRPMs[i] <= MAX_SPEED_RPM) {
+      int gridX = map(gridRPMs[i], 0, MAX_SPEED_RPM, 0, plotWidth - 1);
+      for (int y = plotY + 2; y < plotY + plotHeight - 1; y += 2) {
+        display.drawPixel(plotX + gridX, y, SSD1351_BLUE);
+      }
+    }
   }
 }
 
@@ -1216,20 +1276,66 @@ void initializeStepper() {
   // Initialize timing variables
   lastStepTime = micros();
   lastAccelTime = micros();
+  lastAccelCheckTime = micros();
   currentStep = 0;
   totalSteps = 0;
   currentStepRate = 0.0;
   targetStepRate = 0.0;
+  lastSpeedForAccel = 0.0;
+  isAccelerating = false;
   
   // Initialize stepper to completely off state
   turnOffStepper();
   
   Serial.print("NEMA 17 stepper initialized: ");
   Serial.print(ACTUAL_STEPS_PER_REV);
-  Serial.print(" half-steps/rev, ");
-  Serial.print(STEPPER_TORQUE_PERCENT);
-  Serial.print("% torque, ");
-  Serial.println("OFF when speed = 0");
+  Serial.print(" half-steps/rev, dynamic torque ");
+  Serial.print(STEPPER_TORQUE_MIN_PERCENT);
+  Serial.print("-");
+  Serial.print(STEPPER_TORQUE_MAX_PERCENT);
+  Serial.print("% (+");
+  Serial.print(ACCEL_TORQUE_BOOST_PERCENT);
+  Serial.println("% accel boost), AUTO-OFF");
+}
+
+// Calculate dynamic torque percentage based on RPM and acceleration
+int calculateDynamicTorque(int speedRPM) {
+  int baseTorque = 0;
+  
+  if (speedRPM <= 0) {
+    baseTorque = STEPPER_TORQUE_MIN_PERCENT; // Use minimum for very low speeds
+  }
+  else if (speedRPM <= TORQUE_RAMP_START_RPM) {
+    // Low speed: use minimum torque for efficiency
+    baseTorque = STEPPER_TORQUE_MIN_PERCENT;
+  }
+  else if (speedRPM >= TORQUE_RAMP_END_RPM) {
+    // High speed: use maximum torque for performance
+    baseTorque = STEPPER_TORQUE_MAX_PERCENT;
+  }
+  else {
+    // Ramp zone: linear interpolation between min and max torque
+    int rpmRange = TORQUE_RAMP_END_RPM - TORQUE_RAMP_START_RPM;
+    int torqueRange = STEPPER_TORQUE_MAX_PERCENT - STEPPER_TORQUE_MIN_PERCENT;
+    int rpmAboveStart = speedRPM - TORQUE_RAMP_START_RPM;
+    
+    baseTorque = STEPPER_TORQUE_MIN_PERCENT + 
+                 (rpmAboveStart * torqueRange) / rpmRange;
+  }
+  
+  // Add acceleration boost if accelerating significantly
+  int finalTorque = baseTorque;
+  if (isAccelerating && stepperEnabled) {
+    finalTorque += ACCEL_TORQUE_BOOST_PERCENT;
+    
+    // Cap at 100% to prevent damage
+    if (finalTorque > 100) finalTorque = 100;
+  }
+  
+  // Ensure we stay within reasonable bounds
+  if (finalTorque < STEPPER_TORQUE_MIN_PERCENT) finalTorque = STEPPER_TORQUE_MIN_PERCENT;
+  
+  return finalTorque;
 }
 
 // Set stepper speed and direction with smooth acceleration
@@ -1250,8 +1356,10 @@ void setStepperSpeed(int speedRPM, bool direction) {
       targetStepRate = MAX_STEP_RATE_HZ;
     }
     
-    // Enable coils with configurable torque
-    int torqueValue = (255 * STEPPER_TORQUE_PERCENT) / 100;
+    // Enable coils with dynamic torque based on speed
+    currentTorquePercent = calculateDynamicTorque(speedRPM);
+    int torqueValue = (255 * currentTorquePercent) / 100;
+    
     if (CURRENT_REDUCTION_PWM) {
       // Use PWM on enable pins for current control (reduces heat)
       analogWrite(STEPPER_ENA_PIN, torqueValue);
@@ -1365,6 +1473,20 @@ void stepStepper() {
     // Update speed for display
     currentStepperSpeed = currentStepRate * 60.0 / ACTUAL_STEPS_PER_REV;
     
+    // Check for acceleration every 100ms for smoother detection
+    if (currentTime - lastAccelCheckTime >= 100000) { // 100ms
+      float speedChange = currentStepperSpeed - lastSpeedForAccel;
+      float deltaTimeSeconds = (currentTime - lastAccelCheckTime) / 1000000.0;
+      float acceleration = speedChange / deltaTimeSeconds; // RPM per second
+      
+      // Update acceleration status
+      isAccelerating = (abs(acceleration) > ACCEL_DETECTION_THRESHOLD) && stepperEnabled;
+      
+      // Store values for next calculation
+      lastSpeedForAccel = currentStepperSpeed;
+      lastAccelCheckTime = currentTime;
+    }
+    
     lastAccelTime = currentTime;
   }
   
@@ -1414,6 +1536,9 @@ void turnOffStepper() {
   currentStepRate = 0.0;
   currentStepperSpeed = 0.0;
   stepDelayMicros = 0;
+  currentTorquePercent = 0;
+  isAccelerating = false;
+  lastSpeedForAccel = 0.0;
 }
 
 // Update stepper control based on speed potentiometer
@@ -1437,6 +1562,12 @@ void updateStepperControl() {
       Serial.print(" RPM (");
       Serial.print((int)currentStepRate);
       Serial.print(" steps/sec, ");
+      Serial.print(currentTorquePercent);
+      Serial.print("% torque");
+      if (isAccelerating) {
+        Serial.print(" +BOOST");
+      }
+      Serial.print(", ");
       Serial.print(stepDelayMicros);
       Serial.print("μs/step, ");
       Serial.print(totalSteps);
