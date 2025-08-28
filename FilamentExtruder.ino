@@ -93,18 +93,18 @@
 // ========================================
 // STEPPER MOTOR CONTROL (NEMA 17 + L298N)
 // ========================================
-#define STEPPER_TORQUE_PERCENT 50  // Stepper holding torque (50-100%) - configurable
-#define MAX_SPEED_RPM 200          // Maximum stepper speed (reduced for smoother operation)
+#define STEPPER_TORQUE_PERCENT 20  // Stepper holding torque (20-100%) - configurable
+#define MAX_SPEED_RPM 500          // Maximum stepper speed (reduced for smoother operation)
 #define MIN_SPEED_RPM 1            // Minimum reliable speed
 #define STEPS_PER_REVOLUTION 200   // NEMA 17: 1.8° per step = 200 steps/rev
 #define MICROSTEPS 2               // Half-step mode (smoother operation)
 #define ACTUAL_STEPS_PER_REV (STEPS_PER_REVOLUTION * MICROSTEPS) // 400 half-steps/rev
 
 // Stepper smoothing settings
-#define ACCEL_STEPS_PER_SEC2 800   // Acceleration rate (steps/sec²)
-#define MAX_STEP_RATE_HZ 2000      // Maximum step rate (steps/second)
+#define ACCEL_STEPS_PER_SEC2 500   // Acceleration rate (steps/sec²)
+#define MAX_STEP_RATE_HZ 3333      // Maximum step rate (steps/second)
 #define CURRENT_REDUCTION_PWM true // Use PWM for current control (reduces heat)
-#define IDLE_CURRENT_PERCENT 20    // Current when not moving (reduces heat)
+#define IDLE_CURRENT_PERCENT 15    // Current when not moving (reduces heat)
 
 // L298N controlling NEMA 17 Stepper (4-wire bipolar)
 #define STEPPER_ENA_PIN 6          // Enable A (coil A enable)
@@ -120,7 +120,7 @@
 #define STEPPER_HOLD_MODE true     // Keep coils energized when stopped (holding torque)
 
 // Temperature control settings
-#define MIN_TARGET_TEMP 10         // Minimum target temperature to enable heaters (prevents accidental heating)
+#define MIN_TARGET_TEMP 40         // Minimum target temperature to enable heaters (prevents accidental heating)
 #define MAX_TARGET_TEMP 300
 #define TEMP_TOLERANCE 2           // Temperature tolerance in degrees
 #define HEATER_PWM_FREQUENCY_HZ 30 // PWM frequency for MOSFET control (configurable)
@@ -201,6 +201,7 @@ float getHeaterTemperature(int heaterIndex);
 void setStepperSpeed(int speedRPM, bool direction);
 void stepStepper();
 void stopStepper();
+void turnOffStepper();
 void updateStepperControl();
 void setStepperCoils(int step);
 void emergencyShutdown();
@@ -256,9 +257,7 @@ void setup() {
   Serial.print(NUM_HEATERS);
   Serial.print(" heaters @ ");
   Serial.print(HEATER_PWM_FREQUENCY_HZ);
-  Serial.print("Hz, NEMA17 stepper @ ");
-  Serial.print(STEPPER_TORQUE_PERCENT);
-  Serial.print("%, PID(");
+  Serial.print("Hz, NEMA17 stepper (auto-off), PID(");
   Serial.print(PID_KP);
   Serial.print(",");
   Serial.print(PID_KI);
@@ -1222,16 +1221,15 @@ void initializeStepper() {
   currentStepRate = 0.0;
   targetStepRate = 0.0;
   
-  // Initialize stepper to stopped state
-  stopStepper();
+  // Initialize stepper to completely off state
+  turnOffStepper();
   
   Serial.print("NEMA 17 stepper initialized: ");
   Serial.print(ACTUAL_STEPS_PER_REV);
   Serial.print(" half-steps/rev, ");
   Serial.print(STEPPER_TORQUE_PERCENT);
   Serial.print("% torque, ");
-  Serial.print(IDLE_CURRENT_PERCENT);
-  Serial.println("% idle current");
+  Serial.println("OFF when speed = 0");
 }
 
 // Set stepper speed and direction with smooth acceleration
@@ -1266,6 +1264,8 @@ void setStepperSpeed(int speedRPM, bool direction) {
   } else {
     targetStepRate = 0.0;
     stepperEnabled = false;
+    // Completely turn off stepper when speed is zero
+    turnOffStepper();
   }
 }
 
@@ -1355,6 +1355,11 @@ void stepStepper() {
       stepDelayMicros = 0;
       currentStepRate = 0.0;
       stepperMoving = false;
+      
+      // If target speed is zero, completely turn off the stepper
+      if (targetSpeed == 0 && !stepperEnabled) {
+        turnOffStepper();
+      }
     }
     
     // Update speed for display
@@ -1391,27 +1396,24 @@ void stopStepper() {
   stepperEnabled = false;
   targetStepRate = 0.0;
   // Note: currentStepRate will ramp down via stepStepper() acceleration logic
+  // Motor will be completely turned off once it reaches zero speed
+}
+
+// Completely turn off stepper motor (no power, no holding torque)
+void turnOffStepper() {
+  // Disable all coils and power completely
+  analogWrite(STEPPER_ENA_PIN, 0);
+  analogWrite(STEPPER_ENB_PIN, 0);
+  digitalWrite(STEPPER_IN1_PIN, LOW);
+  digitalWrite(STEPPER_IN2_PIN, LOW);
+  digitalWrite(STEPPER_IN3_PIN, LOW);
+  digitalWrite(STEPPER_IN4_PIN, LOW);
   
-  // Use idle current to reduce heat while maintaining position
-  if (STEPPER_HOLD_MODE) {
-    int idleTorque = (255 * IDLE_CURRENT_PERCENT) / 100;
-    if (CURRENT_REDUCTION_PWM) {
-      analogWrite(STEPPER_ENA_PIN, idleTorque);
-      analogWrite(STEPPER_ENB_PIN, idleTorque);
-    } else {
-      analogWrite(STEPPER_ENA_PIN, idleTorque);
-      analogWrite(STEPPER_ENB_PIN, idleTorque);
-    }
-    // Keep current coil state for position holding
-  } else {
-    // Disable all coils (no holding torque - motor may lose position)
-    analogWrite(STEPPER_ENA_PIN, 0);
-    analogWrite(STEPPER_ENB_PIN, 0);
-    digitalWrite(STEPPER_IN1_PIN, LOW);
-    digitalWrite(STEPPER_IN2_PIN, LOW);
-    digitalWrite(STEPPER_IN3_PIN, LOW);
-    digitalWrite(STEPPER_IN4_PIN, LOW);
-  }
+  // Reset motion variables
+  stepperMoving = false;
+  currentStepRate = 0.0;
+  currentStepperSpeed = 0.0;
+  stepDelayMicros = 0;
 }
 
 // Update stepper control based on speed potentiometer
@@ -1444,9 +1446,7 @@ void updateStepperControl() {
       Serial.print(targetSpeed);
       Serial.println(" RPM)");
     } else {
-      Serial.print("Stepper: STOPPED (");
-      Serial.print(IDLE_CURRENT_PERCENT);
-      Serial.println("% holding current)");
+      Serial.println("Stepper: OFF (no power)");
     }
     
     lastDebugSpeed = currentStepperSpeed;
@@ -1496,8 +1496,8 @@ void emergencyShutdown() {
     setHeaterState(i, false);
   }
   
-  // Stop stepper immediately
-  stopStepper();
+  // Turn off stepper immediately (emergency - no gradual deceleration)
+  turnOffStepper();
   
   // Reset control variables
   heaterPower = 0;
