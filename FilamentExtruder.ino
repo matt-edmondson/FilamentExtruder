@@ -18,25 +18,26 @@
 // ANALOG INPUT PINS
 // ========================================
 
-// Temperature sensing
-#define THERMISTOR_PIN A0           // Analog pin for thermistor reading
-#define THERMISTOR_SERIES_RESISTOR 4660 // Measured 4.7k
+// Temperature sensing (dual thermistors)
+#define THERMISTOR_1_PIN A0         // Primary thermistor (existing)
+#define THERMISTOR_2_PIN A1         // Secondary thermistor (new)
+#define THERMISTOR_1_SERIES_RESISTOR 4660 // Measured 4.7k (each thermistor needs its own)
+#define THERMISTOR_2_SERIES_RESISTOR 4610 // Measured 4.7k (each thermistor needs its own)
 #define THERMISTOR_NOMINAL 100000   // 100k unmeasured
 #define TEMPERATURE_NOMINAL 25
 #define B_COEFFICIENT 3950
 
 // User control potentiometers
-#define SPEED_POT_PIN A1            // Speed control potentiometer
-#define TEMP_POT_PIN A2             // Temperature control potentiometer
+#define SPEED_POT_PIN A2            // Speed control potentiometer
+#define TEMP_POT_PIN A3             // Temperature control potentiometer
 
-// Analog input filtering settings (per input customization)
-#define SPEED_POT_SMOOTHING_FACTOR 0.15   // Speed pot: 0.15 = smoother (reduces noise)
-                                          // Range: 0.1 = very smooth, 0.7 = very responsive
-#define SPEED_POT_DEADBAND 5              // Speed pot deadband: 5 ADC counts (eliminates 1-4 RPM noise)
-
-#define TEMP_POT_SMOOTHING_FACTOR 0.1     // Temp pot: 0.1 = very smooth (temperature stability)  
-                                          // Range: 0.1 = very smooth, 0.7 = very responsive
-#define TEMP_POT_DEADBAND 6               // Temp pot deadband: 6 ADC counts (eliminates 1°C oscillation)
+// Analog input filtering settings (minimum delta approach - no smoothing)
+#define SPEED_POT_MIN_DELTA 0             // Speed pot: minimum 8 ADC count change to update output
+                                          // Adjust: 4 = very sensitive, 8 = balanced, 15 = stable
+                                          
+#define TEMP_POT_MIN_DELTA 0             // Temp pot: minimum 20 ADC count change to update output  
+                                          // Adjust: 5 = sensitive, 10 = balanced, 20 = very stable
+                                          // Increased due to electrical noise from PWM heaters
 
 // ========================================
 // DIGITAL I/O PINS
@@ -62,8 +63,8 @@
 #define HEATER_3_PIN 4              // Tertiary heater control (PWM capable)
 #define HEATER_4_PIN 5              // Quaternary heater control (PWM capable)
 #define NUM_HEATERS 2               // Number of connected heaters
-#define HEATER_OFF HIGH             // Relay OFF state (assuming active-low relays)
-#define HEATER_ON LOW               // Relay ON state
+#define HEATER_OFF LOW             // Relay OFF state (assuming active-low relays)
+#define HEATER_ON HIGH               // Relay ON state
 
 // ========================================
 // DISPLAY CONFIGURATION
@@ -109,7 +110,10 @@
 // Control variables
 int targetSpeed = 0;
 int targetTemperature = 0;
-float currentTemperature = 0;
+float currentTemperature1 = 0;      // Primary thermistor (A0)
+float currentTemperature2 = 0;      // Secondary thermistor (A1)  
+float currentTemperature = 0;       // Average or primary temp (for compatibility)
+float temperatureDifference = 0;    // Temp1 - Temp2 differential
 bool heatersEnabled = false;
 unsigned long lastHeaterUpdate = 0;
 unsigned long heaterOnTime = 0;
@@ -133,7 +137,8 @@ void initializeI2C();
 bool initializeDisplay();
 void initializeHeaters();
 uint16_t readAnalogPot(int pin);
-float readTemperature();
+float readTemperature(int thermistorPin);
+void updateTemperatureReadings();
 void updateDisplay();
 void scanI2CDevices();
 void updateHeaterControl();
@@ -163,7 +168,8 @@ void setup() {
   
   // Arduino Mega 2560 has fixed 10-bit ADC - no analogReadResolution() needed
   delay(100); // Wait for ADC to settle
-  (void)analogRead(THERMISTOR_PIN); // Throw away first reading
+  (void)analogRead(THERMISTOR_1_PIN); // Throw away first reading from primary thermistor
+  (void)analogRead(THERMISTOR_2_PIN); // Throw away first reading from secondary thermistor
  
   // Initialize SPI for display communication
   SPI.begin();
@@ -211,7 +217,8 @@ void loop() {
   targetSpeed = map(constrain(pot1Value, 10, ADC_MAX_VALUE - 10), 10, ADC_MAX_VALUE - 10, 0, MAX_SPEED_RPM);
   targetTemperature = map(constrain(pot2Value, 10, ADC_MAX_VALUE - 10), 10, ADC_MAX_VALUE - 10, 0, MAX_TARGET_TEMP);
 
-  currentTemperature = readTemperature();
+  // Update both temperature readings
+  updateTemperatureReadings();
   
   // Update temperature control system
   updateTemperatureControl();
@@ -253,9 +260,13 @@ void loop() {
   if (valuesChanged || (millis() - lastDebug > 30000)) {
     Serial.print("Speed: ");
     Serial.print(targetSpeed);
-    Serial.print(" RPM | Temp: ");
-    Serial.print(currentTemperature, 1);
-    Serial.print("/");
+    Serial.print(" RPM | T1: ");
+    Serial.print(currentTemperature1, 1);
+    Serial.print("°C | T2: ");
+    Serial.print(currentTemperature2, 1);
+    Serial.print("°C | Diff: ");
+    Serial.print(temperatureDifference, 1);
+    Serial.print("°C | Target: ");
     Serial.print(targetTemperature);
     Serial.print("°C | Power: ");
     Serial.print((int)(heaterPower * 100));
@@ -331,61 +342,78 @@ bool initializeDisplay() {
 }
 
 uint16_t readAnalogPot(int pin) {
-  // Static variables to store filtered values for each pin
-  static float filteredPot1 = 0;
-  static float filteredPot2 = 0;
+  // Ring buffer size for averaging
+  const int RING_BUFFER_SIZE = 8;
+  
+  // Static ring buffers for each pot
+  static uint16_t speedPotBuffer[RING_BUFFER_SIZE] = {0};
+  static uint16_t tempPotBuffer[RING_BUFFER_SIZE] = {0};
+  static int speedPotIndex = 0;
+  static int tempPotIndex = 0;
+  static bool speedPotFilled = false;
+  static bool tempPotFilled = false;
+  
+  // Static variables for output values
+  static uint16_t lastPot1Output = 0;
+  static uint16_t lastPot2Output = 0;
   static bool initialized = false;
   
-  // Read raw analog value
+  // Single ADC reading (no blocking delays)
   uint16_t rawReading = analogRead(pin);
   
-  // Initialize filters on first call
-  if (!initialized) {
-    filteredPot1 = rawReading;
-    filteredPot2 = rawReading; 
-    initialized = true;
-  }
-  
-  // Get per-input smoothing parameters and filter reference
-  float* currentFilter;
-  float smoothingFactor;
+  // Get per-input parameters
+  uint16_t* ringBuffer;
+  int* ringIndex;
+  bool* ringFilled;
+  uint16_t* lastOutput;
+  uint16_t minDelta;
   
   if (pin == SPEED_POT_PIN) {
-    currentFilter = &filteredPot1;
-    smoothingFactor = SPEED_POT_SMOOTHING_FACTOR;
+    ringBuffer = speedPotBuffer;
+    ringIndex = &speedPotIndex;
+    ringFilled = &speedPotFilled;
+    lastOutput = &lastPot1Output;
+    minDelta = SPEED_POT_MIN_DELTA;
   } else if (pin == TEMP_POT_PIN) {
-    currentFilter = &filteredPot2;
-    smoothingFactor = TEMP_POT_SMOOTHING_FACTOR;
+    ringBuffer = tempPotBuffer;
+    ringIndex = &tempPotIndex;
+    ringFilled = &tempPotFilled;
+    lastOutput = &lastPot2Output;
+    minDelta = TEMP_POT_MIN_DELTA;
   } else {
     return rawReading; // Unknown pin, return raw reading
   }
   
-  // Apply exponential smoothing: new_value = (alpha × raw) + ((1-alpha) × old_value)
-  *currentFilter = (smoothingFactor * rawReading) + ((1.0 - smoothingFactor) * (*currentFilter));
-  
-  // Add deadband filter to eliminate tiny jitter around current position
-  static uint16_t lastPot1Output = 0;
-  static uint16_t lastPot2Output = 0;
-  
-  // Get per-input deadband and last output reference
-  uint16_t* lastOutput;
-  uint16_t deadband;
-  
-  if (pin == SPEED_POT_PIN) {
-    lastOutput = &lastPot1Output;
-    deadband = SPEED_POT_DEADBAND;
-  } else {
-    lastOutput = &lastPot2Output;
-    deadband = TEMP_POT_DEADBAND;
+  // Add new reading to ring buffer
+  ringBuffer[*ringIndex] = rawReading;
+  (*ringIndex)++;
+  if (*ringIndex >= RING_BUFFER_SIZE) {
+    *ringIndex = 0;
+    *ringFilled = true;
   }
   
-  uint16_t smoothedReading = (uint16_t)(*currentFilter + 0.5); // Round to nearest integer
+  // Calculate average from ring buffer
+  uint32_t sum = 0;
+  int samples = *ringFilled ? RING_BUFFER_SIZE : (*ringIndex);
+  for (int i = 0; i < samples; i++) {
+    sum += ringBuffer[i];
+  }
+  uint16_t averagedReading = sum / samples;
   
-  // Apply per-input deadband filter to eliminate jitter
-  if (abs(smoothedReading - *lastOutput) > deadband) {
-    *lastOutput = smoothedReading;
+  // Initialize on first call
+  if (!initialized) {
+    lastPot1Output = averagedReading;
+    lastPot2Output = averagedReading; 
+    initialized = true;
+    return averagedReading;
   }
   
+  // Only update output if change is greater than minimum delta
+  if (abs((int)averagedReading - (int)(*lastOutput)) >= minDelta) {
+    *lastOutput = averagedReading;
+  }
+  
+  // Always return the last reported value (creates hysteresis)
   return *lastOutput;
 }
 
@@ -394,7 +422,10 @@ void updateDisplay() {
   static bool displayInitialized = false;
   static int lastTargetSpeed = -1;
   static int lastTargetTemp = -1;
+  static float lastCurrentTemp1 = -999.0;
+  static float lastCurrentTemp2 = -999.0;
   static float lastCurrentTemp = -999.0;
+  static float lastTempDiff = -999.0;
   static float lastHeaterPower = -1.0;
   static bool lastHeatersEnabled = false;
   static bool lastHeaterStates[4] = {false, false, false, false};
@@ -407,7 +438,9 @@ void updateDisplay() {
   // Check if any values have changed significantly (increased thresholds to reduce noise-based updates)
   bool speedChanged = (abs(targetSpeed - lastTargetSpeed) > 5);        // Increased to 5 RPM to ignore noise
   bool targetTempChanged = (abs(targetTemperature - lastTargetTemp) > 2);  // Increased to 2°C to ignore noise
-  bool currentTempChanged = (abs(currentTemperature - lastCurrentTemp) > 0.5); // Keep at 0.5°C for actual temp changes
+  bool currentTempChanged = (abs(currentTemperature1 - lastCurrentTemp1) > 0.5) || 
+                           (abs(currentTemperature2 - lastCurrentTemp2) > 0.5) ||
+                           (abs(temperatureDifference - lastTempDiff) > 0.3); // Any temp sensor or diff changed
   bool powerChanged = (abs(heaterPower - lastHeaterPower) > 0.03);     // Increased to 3% to ignore small power changes
   bool heatersEnabledChanged = (heatersEnabled != lastHeatersEnabled);
   
@@ -450,7 +483,13 @@ void updateDisplay() {
     display.print("Target:");
     
     display.setCursor(5, 62);
-    display.print("Current:");
+    display.print("T1:");
+    
+    display.setCursor(68, 62);
+    display.print("T2:");
+    
+    display.setCursor(5, 74);
+    display.print("Diff:");
     
     display.setCursor(5, 92);
     display.print("Heaters:");
@@ -458,8 +497,7 @@ void updateDisplay() {
     display.setCursor(5, 104);
     display.print("Power:");
     
-    // Draw static bar outlines
-    display.drawRect(10, 78, SCREEN_WIDTH-20, 8, SSD1351_WHITE); // Temp bar
+    // Draw static bar outlines (adjusted positions)
     display.drawRect(5, 116, 62, 6, SSD1351_WHITE); // Power bar
     
     displayInitialized = true;
@@ -504,28 +542,56 @@ void updateDisplay() {
     display.print("C");
   }
   
-  // Current temperature area
+  // Temperature 1 area (primary thermistor)
   if (currentTempChanged || forceFullRefresh) {
-    display.fillRect(60, 62, 60, 8, SSD1351_BLACK); // Clear current temp area
-    display.setCursor(60, 62);
+    display.fillRect(25, 62, 40, 8, SSD1351_BLACK); // Clear T1 area
+    display.setCursor(25, 62);
     // Color code temperature based on proximity to target
-    float tempDiff = abs(currentTemperature - targetTemperature);
-    if (tempDiff < 5) {
+    float temp1Diff = abs(currentTemperature1 - targetTemperature);
+    if (temp1Diff < 5) {
       display.setTextColor(SSD1351_GREEN);  // Close to target
-    } else if (tempDiff < 15) {
+    } else if (temp1Diff < 15) {
       display.setTextColor(SSD1351_YELLOW); // Moderately close
     } else {
       display.setTextColor(SSD1351_RED);    // Far from target
     }
-    display.print(currentTemperature, 1);
+    display.print(currentTemperature1, 1);
     display.setTextColor(SSD1351_WHITE);
     display.print("C");
   }
   
-  // Temperature progress bar (only redraw if temperature changed)
+  // Temperature 2 area (secondary thermistor)  
+  if (currentTempChanged || forceFullRefresh) {
+    display.fillRect(88, 62, 35, 8, SSD1351_BLACK); // Clear T2 area
+    display.setCursor(88, 62);
+    display.setTextColor(SSD1351_CYAN);
+    display.print(currentTemperature2, 1);
+    display.setTextColor(SSD1351_WHITE);
+    display.print("C");
+  }
+  
+  // Temperature difference area
+  if (currentTempChanged || forceFullRefresh) {
+    display.fillRect(35, 74, 80, 8, SSD1351_BLACK); // Clear diff area
+    display.setCursor(35, 74);
+    // Color code difference - green if small, yellow/red if large
+    float absDiff = abs(temperatureDifference);
+    if (absDiff < 2) {
+      display.setTextColor(SSD1351_GREEN);      // Small difference
+    } else if (absDiff < 5) {
+      display.setTextColor(SSD1351_YELLOW);     // Medium difference
+    } else {
+      display.setTextColor(SSD1351_RED);        // Large difference
+    }
+    display.print(temperatureDifference, 1);
+    display.setTextColor(SSD1351_WHITE);
+    display.print("C");
+  }
+  
+  // Temperature progress bar (only redraw if temperature changed) - moved down due to new layout
   if (currentTempChanged || targetTempChanged || forceFullRefresh) {
-    int barY = 78;
-    int barHeight = 8;
+    int barY = 84;  // Moved down to accommodate T2 and Diff lines
+    int barHeight = 6; // Slightly smaller
     int barWidth = SCREEN_WIDTH - 20;
     
     // Clear bar interior
@@ -533,7 +599,8 @@ void updateDisplay() {
     
     int tempBarFill = 0;
     if (targetTemperature > 0) {
-      tempBarFill = map(constrain(currentTemperature, 0, targetTemperature), 0, targetTemperature, 0, barWidth-2);
+      // Use primary temperature (T1) for the bar
+      tempBarFill = map(constrain(currentTemperature1, 0, targetTemperature), 0, targetTemperature, 0, barWidth-2);
     }
     
     // Fill temperature bar with gradient effect
@@ -550,6 +617,9 @@ void updateDisplay() {
         display.drawLine(11+x, barY+1, 11+x, barY+barHeight-2, barColor);
       }
     }
+    
+    // Draw static bar outline
+    display.drawRect(10, barY, barWidth, barHeight, SSD1351_WHITE); // Temp bar
   }
   
   // Heater status area
@@ -585,7 +655,10 @@ void updateDisplay() {
   // Update last known values
   lastTargetSpeed = targetSpeed;
   lastTargetTemp = targetTemperature;
+  lastCurrentTemp1 = currentTemperature1;
+  lastCurrentTemp2 = currentTemperature2;
   lastCurrentTemp = currentTemperature;
+  lastTempDiff = temperatureDifference;
   lastHeaterPower = heaterPower;
   lastHeatersEnabled = heatersEnabled;
   for (int i = 0; i < NUM_HEATERS; i++) {
@@ -644,30 +717,38 @@ void scanI2CDevices() {
   }
 }
 
-float readTemperature() {
-  // Static variables for temperature denoising and 1Hz sampling
-  static float filteredADC = 0;
-  static float filteredTemperature = 0;
-  static bool tempInitialized = false;
-  static unsigned long lastSampleTime = 0;
-  static float lastTempOutput = 25.0; // Default room temperature
+float readTemperature(int thermistorPin) {
+  // Static variables for temperature denoising and 1Hz sampling - separate for each thermistor
+  static float filteredADC1 = 0, filteredADC2 = 0;
+  static float filteredTemperature1 = 0, filteredTemperature2 = 0;
+  static bool tempInitialized1 = false, tempInitialized2 = false;
+  static unsigned long lastSampleTime1 = 0, lastSampleTime2 = 0;
+  static float lastTempOutput1 = 25.0, lastTempOutput2 = 25.0; // Default room temperature
+  
+  // Select variables based on thermistor pin
+  float* filteredADC = (thermistorPin == THERMISTOR_1_PIN) ? &filteredADC1 : &filteredADC2;
+  float* filteredTemperature = (thermistorPin == THERMISTOR_1_PIN) ? &filteredTemperature1 : &filteredTemperature2;
+  bool* tempInitialized = (thermistorPin == THERMISTOR_1_PIN) ? &tempInitialized1 : &tempInitialized2;
+  unsigned long* lastSampleTime = (thermistorPin == THERMISTOR_1_PIN) ? &lastSampleTime1 : &lastSampleTime2;
+  float* lastTempOutput = (thermistorPin == THERMISTOR_1_PIN) ? &lastTempOutput1 : &lastTempOutput2;
   
   // 1Hz sampling: Only read ADC once per second to prevent self-heating
   unsigned long currentTime = millis();
   const unsigned long sampleInterval = 1000; // 1000ms = 1Hz
   
   // Check if it's time for a new sample
-  if (currentTime - lastSampleTime >= sampleInterval || !tempInitialized) {
+  if (currentTime - *lastSampleTime >= sampleInterval || !*tempInitialized) {
     // Read raw ADC value
-    int rawADC = analogRead(THERMISTOR_PIN);
+    int rawADC = analogRead(thermistorPin);
     
     // Initialize filters on first call with actual temperature reading
-    if (!tempInitialized) {
-      filteredADC = rawADC;
-      
+    if (!*tempInitialized) {
+      *filteredADC = rawADC;
+      float seriesResistor = (thermistorPin == THERMISTOR_1_PIN) ? THERMISTOR_1_SERIES_RESISTOR : THERMISTOR_2_SERIES_RESISTOR;
+
       // Calculate actual temperature from first reading to avoid 0°C startup
       float voltage = rawADC * (VREF / (float)ADC_MAX_VALUE);
-      float resistance = THERMISTOR_SERIES_RESISTOR * voltage / (VREF - voltage);
+      float resistance = seriesResistor * voltage / (VREF - voltage);
       float steinhart = resistance / THERMISTOR_NOMINAL;
       steinhart = log(steinhart);
       steinhart /= B_COEFFICIENT;
@@ -676,23 +757,25 @@ float readTemperature() {
       steinhart -= 273.15;
       
       // Initialize temperature filter with actual reading instead of 0
-      filteredTemperature = steinhart;
-      lastTempOutput = steinhart;
+      *filteredTemperature = steinhart;
+      *lastTempOutput = steinhart;
       
-      tempInitialized = true;
-      lastSampleTime = currentTime;
+      *tempInitialized = true;
+      *lastSampleTime = currentTime;
     }
     
     // First-stage filter: Smooth ADC readings (faster response for electrical noise)
     const float adcSmoothingFactor = 0.3; // More responsive than pot filters
-    filteredADC = (adcSmoothingFactor * rawADC) + ((1.0 - adcSmoothingFactor) * filteredADC);
+    *filteredADC = (adcSmoothingFactor * rawADC) + ((1.0 - adcSmoothingFactor) * (*filteredADC));
     
     // Use filtered ADC value for calculations
-    int smoothedRaw = (int)(filteredADC + 0.5); // Round to nearest integer
+    int smoothedRaw = (int)(*filteredADC + 0.5); // Round to nearest integer
     
+    float seriesResistor = (thermistorPin == THERMISTOR_1_PIN) ? THERMISTOR_1_SERIES_RESISTOR : THERMISTOR_2_SERIES_RESISTOR;
+
     // Calculate resistance using VREF and series resistor values
     float voltage = smoothedRaw * (VREF / (float)ADC_MAX_VALUE);
-    float resistance = THERMISTOR_SERIES_RESISTOR * voltage / (VREF - voltage);
+    float resistance = seriesResistor * voltage / (VREF - voltage);
     
     // Steinhart-Hart equation
     float steinhart = resistance / THERMISTOR_NOMINAL;
@@ -704,21 +787,36 @@ float readTemperature() {
     
     // Second-stage filter: Smooth final temperature (slower, for thermal stability)
     const float tempSmoothingFactor = 0.1; // Very smooth for temperature stability
-    filteredTemperature = (tempSmoothingFactor * steinhart) + ((1.0 - tempSmoothingFactor) * filteredTemperature);
+    *filteredTemperature = (tempSmoothingFactor * steinhart) + ((1.0 - tempSmoothingFactor) * (*filteredTemperature));
     
     // Temperature deadband: only significant changes update the output
     const float tempDeadband = 0.5; // Ignore changes smaller than 0.5°C
     
-    if (fabs(filteredTemperature - lastTempOutput) > tempDeadband) {
-      lastTempOutput = filteredTemperature;
+    if (fabs(*filteredTemperature - *lastTempOutput) > tempDeadband) {
+      *lastTempOutput = *filteredTemperature;
     }
     
     // Update sample time
-    lastSampleTime = currentTime;
+    *lastSampleTime = currentTime;
   }
   
   // Always return the last valid temperature (cached between samples)
-  return lastTempOutput;
+  return *lastTempOutput;
+}
+
+void updateTemperatureReadings() {
+  // Read both thermistors
+  currentTemperature1 = readTemperature(THERMISTOR_1_PIN);
+  currentTemperature2 = readTemperature(THERMISTOR_2_PIN);
+  
+  // Calculate temperature difference (positive = temp1 higher than temp2)
+  temperatureDifference = currentTemperature1 - currentTemperature2;
+  
+  // Set primary temperature for existing control system (using temp1 as primary)
+  currentTemperature = currentTemperature1;
+  
+  // Alternative: use average temperature instead
+  // currentTemperature = (currentTemperature1 + currentTemperature2) / 2.0;
 }
 
 void initializeHeaters() {
@@ -870,7 +968,10 @@ void updateHeaterControl() {
     } else {
       Serial.print("Heater Status: ");
     }
-    Serial.print(currentTemperature, 1);
+    Serial.print("T1:");
+    Serial.print(currentTemperature1, 1);
+    Serial.print("°C T2:");
+    Serial.print(currentTemperature2, 1);
     Serial.print("°C/");
     Serial.print(targetTemperature);
     Serial.print("°C @ ");
@@ -1060,9 +1161,13 @@ void resetSafetyTimeout() {
 void emergencyShutdown() {
   if (!emergencyWarningShown) {
     Serial.println("EMERGENCY SHUTDOWN - Temperature too high!");
-    Serial.print("Current temperature: ");
+    Serial.print("Current temperatures: T1:");
+    Serial.print(currentTemperature1);
+    Serial.print("°C T2:");
+    Serial.print(currentTemperature2);
+    Serial.print("°C (Primary:");
     Serial.print(currentTemperature);
-    Serial.print("°C exceeds safety limit of ");
+    Serial.print("°C) exceeds safety limit of ");
     Serial.print(SAFETY_MAX_TEMP);
     Serial.println("°C");
     emergencyWarningShown = true; // Only show emergency message once
